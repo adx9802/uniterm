@@ -19,7 +19,7 @@ use uniterm_core::{AgentStatus, LayoutNode, PaneId, ProjectId};
 /// launch ancestry. Version 8 adds replayable Project directory changes. Version 7 made native bindings, saved profiles and exact
 /// Task transfers atomic. Older binaries refuse future schemas rather than
 /// quarantining events they cannot decode.
-pub const EVENT_VERSION: u32 = 9;
+pub const EVENT_VERSION: u32 = 10;
 
 /// One startup repair of a suffix that could not have been durably ordered.
 pub struct RepairReport {
@@ -535,6 +535,30 @@ pub enum LogEvent {
     /// corresponding side effect or human escalation.
     GuardrailDecision {
         record: uniterm_core::GuardrailRecord,
+    },
+    /// A human armed delegated answering for one Pane invocation. The digest
+    /// pins the exact policy the consent covered so a later config edit
+    /// cannot quietly widen what was armed.
+    DelegationArmed {
+        pane: PaneId,
+        invocation: Option<i32>,
+        policy_digest: String,
+    },
+    /// Delegated answering stopped, whether by the human or by lifecycle:
+    /// pane close, agent exit or unbind, invocation change, or budget
+    /// exhaustion. Replay never restores the armed set; re-arming after a
+    /// restart is the human's fresh consent.
+    DelegationDisarmed {
+        pane: PaneId,
+        invocation: Option<i32>,
+        reason: String,
+    },
+    /// One pure delegation verdict, appended BEFORE any approval bytes are
+    /// typed so the audit trail exists even if typing fails. The record
+    /// carries the waiting id, so adjacent-duplicate suppression cannot
+    /// swallow a decision.
+    DelegationDecision {
+        record: uniterm_core::DelegationRecord,
     },
     OrchestrationSubmitted {
         kind: uniterm_proto::OrchestrationKind,

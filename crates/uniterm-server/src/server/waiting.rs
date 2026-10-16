@@ -71,6 +71,7 @@ impl Server {
                 self.append_event(crate::eventlog::LogEvent::WaitingUpdated { id, summary });
             }
             uniterm_core::WaitingChange::Created(item) => {
+                self.maybe_delegate_waiting(&item);
                 self.append_event(crate::eventlog::LogEvent::WaitingCreated { item });
             }
             uniterm_core::WaitingChange::Replaced { resolved, created } => {
@@ -78,6 +79,7 @@ impl Server {
                     id: resolved,
                     resolution: uniterm_core::WaitingResolution::AgentAdvanced,
                 });
+                self.maybe_delegate_waiting(&created);
                 self.append_event(crate::eventlog::LogEvent::WaitingCreated { item: created });
             }
             uniterm_core::WaitingChange::Resolved { id, resolution } => {

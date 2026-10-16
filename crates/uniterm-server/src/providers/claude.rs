@@ -112,3 +112,9 @@ pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
     model_flag: Some("--model"),
     profile_flag: None,
 };
+
+/// What a human types to approve this provider's permission prompt once.
+/// Claude Code's prompt is a numbered menu whose option 1 is "Yes", so the
+/// delegated reply is `1` followed by the usual Enter. Kept beside the
+/// detection rules so nothing outside this module branches on the agent id.
+pub(super) const APPROVAL_REPLY: &str = "1";

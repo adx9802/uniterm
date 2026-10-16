@@ -286,6 +286,9 @@ impl Server {
                             "task.delete".into(),
                             "waiting.list".into(),
                             "waiting.act".into(),
+                            "delegation.arm".into(),
+                            "delegation.status".into(),
+                            "delegation.explain".into(),
                             "orchestration.submit".into(),
                             "events.subscribe".into(),
                         ],
@@ -730,16 +733,50 @@ impl Server {
                         },
                     )
                 }
-                // The wire surface lands before its supervisor; the dispatch
-                // is implemented in the server delegation change.
-                ControlCommand::DelegationArm { .. }
-                | ControlCommand::DelegationDisarm { .. }
-                | ControlCommand::DelegationStatus { .. }
-                | ControlCommand::DelegationExplain { .. } => ControlResponse::error(
+                // Arming hands an approval capability to the supervisor, so
+                // it carries the human's confirmation on the wire (docs/19);
+                // an unconfirmed request changes nothing.
+                ControlCommand::DelegationArm { pane, confirmed } => {
+                    if !confirmed {
+                        ControlResponse::error(
+                            request.id,
+                            "confirmation_required",
+                            "Arming delegated answering needs confirmed: true",
+                        )
+                    } else {
+                        match self.arm_delegation(reg, pane) {
+                            Ok(entry) => ControlResponse::ok(request.id, ControlResult::Delegation {
+                                entries: vec![entry],
+                            }),
+                            Err((code, message)) => ControlResponse::error(request.id, code, message),
+                        }
+                    }
+                }
+                ControlCommand::DelegationDisarm { pane } => {
+                    let found = self.disarm_delegation(pane, "disarmed");
+                    ControlResponse::ok(
+                        request.id,
+                        ControlResult::Mutation {
+                            resource: "delegation".into(),
+                            id: Some(pane.0),
+                            found,
+                            accepted: found,
+                        },
+                    )
+                }
+                ControlCommand::DelegationStatus { pane } => ControlResponse::ok(
                     request.id,
-                    "not_implemented",
-                    "delegation dispatch is not implemented yet",
+                    ControlResult::Delegation {
+                        entries: self.delegation_entries(pane),
+                    },
                 ),
+                ControlCommand::DelegationExplain { pane } => {
+                    let (found, verdict) = self.explain_delegation(pane);
+                    ControlResponse::ok(
+                        request.id,
+                        ControlResult::DelegationExplanation { pane, found, verdict },
+                    )
+                }
                 ControlCommand::PaneRead { pane, lines } => {
                     let (found, text, truncated) = self
                         .bounded_pane_output(pane, lines)

@@ -777,6 +777,7 @@ mod tests {
             evidence: "permission prompt visible".into(),
             details: uniterm_core::AgentDetails::default(),
             waiting: None,
+            delegated: false,
             run: None,
             role: None,
             role_name: None,

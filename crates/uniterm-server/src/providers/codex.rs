@@ -231,6 +231,13 @@ pub(super) fn global_files() -> Vec<(String, std::path::PathBuf)> {
 }
 
 /// Interactive CLI arguments, kept beside this provider's detection rules.
+/// What a human types to approve this provider's permission prompt once.
+/// Codex asks to "press enter to confirm", so the delegated reply is an
+/// empty paste whose submit contributes exactly the bare carriage return.
+/// Kept beside the detection rules so nothing outside this module branches
+/// on the agent id.
+pub(super) const APPROVAL_REPLY: &str = "";
+
 pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
     prefix: &[],
     prompt_flag: None,

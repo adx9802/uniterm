@@ -86,6 +86,12 @@ pub const MANIFEST: Manifest = Manifest {
 };
 
 /// Interactive CLI arguments, kept beside this provider's detection rules.
+/// What a human types to approve this provider's permission prompt once.
+/// Cursor Agent's prompt offers "run (once) (y)", so the delegated reply is
+/// `y` followed by the usual Enter. Kept beside the detection rules so
+/// nothing outside this module branches on the agent id.
+pub(super) const APPROVAL_REPLY: &str = "y";
+
 pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
     prefix: &[],
     prompt_flag: None,

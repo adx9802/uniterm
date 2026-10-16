@@ -2011,9 +2011,13 @@ pub enum ServerMessage {
         accepted: bool,
         items: Vec<WaitingEntry>,
     },
-    /// Armed delegations and their hourly budget consumption.
+    /// Armed delegations and their hourly budget consumption. `error`
+    /// carries why an arm request failed (no bound agent, unverified
+    /// provider); it is never set for status and disarm replies.
     Delegation {
         entries: Vec<DelegationEntry>,
+        #[serde(default)]
+        error: Option<String>,
     },
     /// The verdict the delegate would reach for a Pane's active waiting item
     /// right now; nothing is answered.
@@ -2943,6 +2947,9 @@ pub struct FleetEntry {
     /// The answerable waiting item for this invocation, if any.
     #[serde(default)]
     pub waiting: Option<u64>,
+    /// Delegated answering is armed for this Pane's current invocation.
+    #[serde(default)]
+    pub delegated: bool,
 }
 
 /// One role in a run-graph inspection response.
@@ -3031,7 +3038,8 @@ pub struct DelegationEntry {
     pub pane: PaneId,
     pub agent: String,
     /// Invocation the arm is scoped to; answers never leak across it.
-    pub invocation: i32,
+    #[serde(default)]
+    pub invocation: Option<i32>,
     /// Milliseconds timestamp of the arm, for audit display.
     pub armed_at_ms: u64,
     /// Approvals typed within the current hourly window.
@@ -3326,17 +3334,18 @@ mod tests {
         let entry = DelegationEntry {
             pane: PaneId(7),
             agent: "claude".into(),
-            invocation: 3,
+            invocation: Some(3),
             armed_at_ms: 42,
             answers_used: 2,
             answers_remaining: 28,
         };
         decoder.push(&encode_frame(&ServerMessage::Delegation {
             entries: vec![entry.clone()],
+            error: None,
         }));
         assert!(matches!(
             decoder.decode::<ServerMessage>().unwrap().unwrap(),
-            ServerMessage::Delegation { entries } if entries == vec![entry.clone()]
+            ServerMessage::Delegation { entries, error: None } if entries == vec![entry.clone()]
         ));
 
         // NDJSON control protocol.

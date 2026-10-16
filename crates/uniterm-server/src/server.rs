@@ -55,6 +55,7 @@ mod artifact;
 #[path = "server/chrome.rs"]
 mod chrome_ui;
 mod control;
+mod delegate;
 mod dev_servers;
 mod event_projection;
 mod guardrail;
@@ -671,6 +672,14 @@ pub struct Server {
     tasks_dirty: bool,
     /// Active human-attention items, projected from the same event stream.
     waiting: uniterm_core::WaitingQueue,
+    /// Per-pane delegated answering, scoped to one invocation and process
+    /// group. Never restored from the event log: re-arming after a restart
+    /// is the human's fresh consent.
+    delegated: HashMap<PaneId, delegate::DelegationState>,
+    /// Panes whose newest waiting item still needs one delegation verdict.
+    /// Drained on the run loop's flush block, where a registry is available
+    /// for the guarded terminal-delivery path.
+    pending_delegation: Vec<PaneId>,
     /// Human direction waiting for an exact active agent invocation.
     instructions: uniterm_core::InstructionQueue,
     /// Native run relationships projected from append-only lifecycle events.
@@ -907,6 +916,8 @@ impl Server {
             task_detail_cache: None,
             tasks_dirty: false,
             waiting: uniterm_core::WaitingQueue::new(),
+            delegated: HashMap::new(),
+            pending_delegation: Vec::new(),
             instructions: uniterm_core::InstructionQueue::new(),
             run_graph: uniterm_core::RunGraph::new(),
             run_graph_sequence: 0,
@@ -1059,6 +1070,7 @@ impl Server {
                 }
             }
             self.flush_detection_due(poll.registry());
+            self.flush_delegation(poll.registry());
             self.flush_prompt_deliveries_due(poll.registry());
             self.flush_artifact_validations_due();
             self.flush_orchestration_elapsed_due(poll.registry());

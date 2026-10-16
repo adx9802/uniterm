@@ -533,6 +533,7 @@ impl Server {
         }
         if invocation_ended {
             self.cancel_stale_instructions(pane_id, None);
+            self.disarm_delegation(pane_id, "agent_unbound");
         } else if let Some(invocation) = invocation_changed {
             self.cancel_stale_instructions(pane_id, invocation);
         }
