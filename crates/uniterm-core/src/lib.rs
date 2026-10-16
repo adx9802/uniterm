@@ -10,6 +10,7 @@ pub mod agent_detail;
 pub mod approval;
 pub mod artifact;
 pub mod config;
+pub mod delegate;
 pub mod grid;
 pub mod guardrail;
 pub mod instruction;
@@ -32,6 +33,11 @@ pub use artifact::{
 pub use config::{
     Config, ConfigDiagnostic, EditorRule, KeyBinding, NotificationDelivery, NotificationSound,
     StatusPosition, Theme, ThemePreset,
+};
+pub use delegate::{
+    evaluate_delegation, CommandRule, DelegateVerdict, DelegationFacts, DelegationPolicy,
+    DelegationRecord, DELEGATION_DEFAULT_ANSWERS_PER_HOUR, DELEGATION_MAX_ANSWERS_PER_HOUR,
+    DELEGATION_MAX_RULES,
 };
 pub use grid::{Attrs, Cell, Color, Grid, GridCapture, StoredCell, StoredLine, UnderlineStyle};
 pub use guardrail::{
