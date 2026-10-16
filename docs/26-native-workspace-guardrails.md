@@ -3,7 +3,7 @@
 ## Purpose
 
 Uniterm can enforce policy over native actions whose ownership and side effects it controls.
-This boundary adds provider-neutral launch, capacity, iteration, elapsed-time, Project, and confirmed rollback decisions without claiming to sandbox arbitrary commands executed inside a provider CLI.
+This boundary adds provider-neutral launch, capacity, iteration, elapsed-time, Project, confirmed rollback, and delegated-answer decisions without claiming to sandbox arbitrary commands executed inside a provider CLI.
 
 The pure policy is in `uniterm-core`.
 The mio server supplies stable Workspace facts, appends every decision before the corresponding side effect, and routes elapsed-time asks through the existing waiting queue.
@@ -80,6 +80,11 @@ Waiting resolution remains the separate durable record of what the human chose.
 This is an automation contract, not a security boundary around child processes.
 It does not intercept provider network calls, filesystem operations, shell commands, credentials, or model APIs.
 It adds no credential proxy, inference gateway, cloud runner, or third-party protocol bridge.
+
+Delegated answering (`ut delegate arm`) is not an exception to that limit and changes nothing about it.
+Interception would mean sitting inside the provider's tool-call path and rewriting or blocking its operations; Uniterm never enters that path.
+Delegation types the provider's own approval reply into the pane through the same guarded terminal delivery a human answer uses, only after the pure policy in `uniterm-core` allows the pending tool call, and every verdict is an append-only `DelegationDecision` recorded before the first byte moves.
+The provider still shows its prompt, still owns the operation, and still executes exactly what it asked about; the only difference is whose fingers pressed the approval key.
 
 Token and cost budgets remain disabled.
 Uniterm does not yet own authoritative invocation-scoped usage facts, and screen estimates are not acceptable enforcement inputs.

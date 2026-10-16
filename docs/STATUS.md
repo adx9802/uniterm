@@ -152,6 +152,7 @@ A capability with no test is recorded here as `none` and cannot be described as 
 | Git checkpoint and rollback confirmed by Git before caching | Shipped | Tokio-side `CoreToAgent::RelayCheckpointCreate` handler | `relay_checkpoint_is_cached_only_after_git_can_restore_it`, `relay_checkpoint_failure_returns_no_false_reference` | |
 | Restart recovery of active workflows and relays | Shipped | `server::orchestration` recovery projection | `recovered_runs_accept_only_restartable_phases_and_valid_shapes`, `recovery_preserves_mixed_providers_and_migrates_legacy_scalar_ownership`, `orchestration_projection_replay_keeps_only_active_runs` | Unit-level projection tests; no end-to-end kill-and-restart integration test |
 | Workspace-scoped waiting queue with focus, answer, dismiss, stop, resume, rollback | Shipped | `ut waiting`, Observatory waiting rows, `server::waiting` | `relay_needs_input_can_be_answered_and_then_completes`, `waiting_answer_uses_the_semantic_action_and_preserves_utf8`, `rollback_is_only_offered_for_a_relay_wait` | |
+| Delegated permission answering (assistant supervisor) | Shipped | `ut delegate arm/disarm/status/explain`; `uniterm_core::delegate::evaluate_delegation`; `server::delegate` | 12 delegate.rs unit tests plus `delegated_permission_is_answered_and_audited`, `an_unarmed_pane_is_byte_identical`, `deny_floor_never_answers`, `question_is_never_delegated`, `identical_reask_loop_withholds`, `budget_exhaustion_disarms_until_rearmed`, `delegation_disarms_on_invocation_change_and_pane_close`, `arm_requires_confirmation_over_control`, `a_restart_never_restores_arms_or_answers` (tests/delegation.rs) | Approval replies verified for claude, codex, and cursor; other providers refuse arming |
 | Instruction queue and steering | Shipped | `ut instruction list/add/replace/cancel/send-now` | `instructions_wait_for_cooperative_ready_and_stay_invocation_scoped` (tests/instruction_queue.rs); 5 instruction.rs unit tests | P1B |
 | Responsive provider discovery and launch preflight | Shipped | `server::launch`, `CoreToAgent::ResolveProviders`, `runtime::try_provider_resolution_permit` | `delayed_provider_resolution_keeps_pty_and_persistence_responsive_and_rejects_stale_targets`, `cancelled_control_changed_path_and_stopped_callbacks_cannot_launch`, `provider_worker_admission_stays_bounded_after_requester_disconnects`; `ag8_manage`, `child_run_fork`, `control_api`, `orchestration_waiting`, `task_launch` integration suites | Detached blocking workers preserve ordered persistence responsiveness; request-scoped authority revalidates targets and PATH, preserves completion acknowledgements, and bounds workers independently of connection lifetime |
 | Agent selection and real agent launch from New Task | Shipped | `@agent` token in New Task; `workflow::launch_invocation` | `suggests_installed_agents_after_at`, `launch_invocation_quotes_custom_executable_paths`, `announce_wrapper_emits_a_parseable_envelope` | W1 |
@@ -247,7 +248,7 @@ A capability with no test is recorded here as `none` and cannot be described as 
 
 | Status | Count |
 |---|---|
-| Shipped | 135 |
+| Shipped | 136 |
 | Partial | 2 |
 | Missing | 14 |
 | By design absent | 4 |

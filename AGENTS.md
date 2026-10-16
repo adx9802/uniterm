@@ -22,15 +22,19 @@ If a decision here seems arbitrary, the reasoning is in the docs; read it before
 
 ```
 crates/
-  uniterm-core/     Pure model + pure logic: grid and damage, layout tree, agent status,
-                    the workflow/relay decision engines, run graph, artifact ledger,
-                    guardrails, tasks, waiting and instruction queues. NO UI, NO async, NO I/O.
+  uniterm-core/     Pure model + pure logic: grid and damage, layout tree, agent status and
+                    agent detail, the workflow/relay decision engines, run graph, artifact
+                    ledger, guardrails, delegation policy, tasks, timeline, and the waiting
+                    and instruction queues. NO UI, NO async, NO I/O.
   uniterm-proto/    Wire + channel message types (the mio<->tokio seam, the client protocol,
                     the control API).
   uniterm-server/   The mio core loop (server.rs plus server/*: io, messages, chrome, mouse,
-                    agents, projects, socket, and the projection modules), the damage-tracked
-                    renderer, the VT parser, the tokio agent runtime, providers, persistence,
-                    and the control server.
+                    agents, projects, socket, orchestration, guardrail, delegation, waiting,
+                    instruction, artifact, launch, worktree, tab_stacks, native_resume,
+                    reaper, scrolling, today, and the projection modules), the damage-tracked
+                    renderer, the VT parser, the tokio agent runtime, providers and
+                    connectors, persistence, history, timeline, privacy, and the control
+                    server.
   uniterm-client/   The thin attach client, input decoding, the overlays and modals, and the
                     one-shot request helpers (the only crate that may use ratatui).
   uniterm-cli/      The `uniterm` binary front door (alias `ut`), remote attach, migration.

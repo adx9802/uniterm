@@ -208,6 +208,11 @@ This is what keeps the tool current as the agent ecosystem churns.
   Heuristic idle evidence never injects queued direction.
 - **Answer and approve**: resolving a `question` or `permission` from the waiting queue injects the answer or the approve/deny back into the pane (or, for structured agents, over their protocol).
   Injection is guarded terminal delivery, not an out-of-band approval: the item must belong to the current invocation and the agent must still show that kind of prompt, otherwise the item is retired and nothing is typed.
+- **Delegated answering**: an armed pane lets the server answer permission prompts on the human's behalf, inside a strict policy.
+  The human arms one pane explicitly (`ut delegate arm PANE`, or the control `delegation.arm` with `"confirmed": true`); the arm is scoped to that pane's current agent invocation and never survives a restart, an invocation change, an agent exit, or a pane close.
+  Each new permission item is evaluated by the pure policy engine in `uniterm-core` (`evaluate_delegation`): the kind must be `permission`, the pending tool call must survive an in-file shell-word lexer that rejects substitution, redirection, pipes, and chaining, it must clear a compiled-in deny floor (privilege escalation, network actors, destructive filesystem and git operations, credential and dotfile paths, anything escaping the Project root), and it must match a configured `delegation-allow` rule with every path argument inside the Project root.
+  On Allow the server types the provider's own approval reply through the same guarded paste path a human answer uses, after revalidating that the prompt is still live; the `DelegationDecision` is appended to the event log before any bytes move, so the audit trail exists even when typing fails.
+  Safety rails bound the blast radius: an hourly answer budget (`delegation-max-answers-per-hour`, default 30, hard cap 240) auto-disarms the arm when exhausted, an identical re-ask within a minute withholds as a suspected loop, questions are never delegated, and items without structured tool data withhold by construction.
 - **Reap**: stopping an agent signals its whole process group with SIGTERM, waits a short grace, then SIGKILL, so no descendants are orphaned.
 
 ## Discovery of external agents

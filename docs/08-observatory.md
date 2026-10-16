@@ -67,6 +67,7 @@ One list of everything, in this workspace, that needs a human, built on demand f
 - **Close-tab prompts**: a pane with running work the user tried to close, with confirm-close or keep.
 
 The Fleet view shows a waiting badge (a count with a red marker), and when the count changes the Observatory can auto-focus the waiting queue, because clearing it is usually the highest-priority action.
+The detail panel marks a pane armed for delegated answering, so an auto-approved permission prompt never looks like a human answered it.
 Every item resolves to a focus target (Pane, then Tab, then Project, then Workspace) so the human can jump straight to the context.
 
 This is where human-and-fleet coordination happens.

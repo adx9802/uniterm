@@ -60,3 +60,19 @@ Local agent providers can be added or overridden without rebuilding, and a valid
 Save that document as `$XDG_CONFIG_HOME/uniterm/providers.json` (normally `~/.config/uniterm/providers.json`).
 Validate it offline with `ut agent manifests validate PATH`.
 The complete schema, source precedence, verified cache, last-known-good, and reload contract is in [`22-provider-detection-manifests.md`](22-provider-detection-manifests.md).
+
+## Delegated answering
+
+Two keys bound what an armed pane may auto-approve (see [06-agentic-supervision.md](06-agentic-supervision.md)):
+
+```ini
+# ~/.config/uniterm/uniterm.conf
+delegation-allow = git status        # repeatable: program plus optional argument prefix
+delegation-allow = cargo test
+delegation-max-answers-per-hour = 30 # 1..240, default 30
+```
+
+`delegation-allow` is an allowlist on top of a compiled-in deny floor, not a replacement for it: privilege escalation, network actors, destructive filesystem and git operations, credential and dotfile paths, shell substitution or chaining, and any path escaping the pane's Project root withhold no matter what is configured.
+A rule matches when the pending tool call's program equals the rule's program and its arguments start with the rule's argument prefix on a shell-word boundary, and every path-like argument must resolve inside the Project root.
+At most 64 rules of 256 bytes each are kept; extras are diagnosed and dropped.
+When the hourly budget is spent the arm disarms itself until the human re-arms, and `ut config check` reports every delegation key problem as an error.
