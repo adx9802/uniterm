@@ -47,6 +47,23 @@ impl Server {
         self.record_waiting_change(change);
     }
 
+    /// Reconcile one Pane's waiting entry against its current smoothed status
+    /// outside any status transition. Resolving an item (answer, dismiss)
+    /// retires it without changing the status, and when a screen or title
+    /// rule pins the agent at a waiting status across that resolution no
+    /// transition ever fires; without this pass a repeated identical prompt
+    /// would never surface in the queue again.
+    pub(super) fn refresh_waiting_for_pane(&mut self, pane: PaneId) {
+        if let Some(status) = self
+            .panes
+            .get(&pane)
+            .and_then(|pane| pane.agent.as_ref())
+            .map(|agent| agent.status)
+        {
+            self.sync_waiting_agent(pane, status);
+        }
+    }
+
     pub(super) fn record_waiting_change(&mut self, change: uniterm_core::WaitingChange) {
         match change {
             uniterm_core::WaitingChange::None => {}
@@ -231,6 +248,11 @@ impl Server {
                         item.pane,
                         uniterm_core::WaitingResolution::Answered,
                     );
+                    // The answer changes no status, so when a rule pins the
+                    // agent at this waiting status no transition reconciles
+                    // the queue; the repeated identical prompt needs its own
+                    // item now.
+                    self.refresh_waiting_for_pane(item.pane);
                     self.arm_orchestration_deadline(item.pane);
                 }
                 (true, accepted)
@@ -246,6 +268,9 @@ impl Server {
                     item.pane,
                     uniterm_core::WaitingResolution::Dismissed,
                 );
+                // Dismissal retires the item without changing the status, so
+                // reconcile exactly like the answer path above.
+                self.refresh_waiting_for_pane(item.pane);
                 (true, true)
             }
             uniterm_proto::WaitingAction::Stop => {

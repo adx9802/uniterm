@@ -544,14 +544,7 @@ impl Server {
             // A permission payload that lands while the prompt is already
             // shown refreshes the existing item in place: same id, no churn.
             // A new invocation that is already blocked gets its own item.
-            if let Some(status) = self
-                .panes
-                .get(&pane_id)
-                .and_then(|pane| pane.agent.as_ref())
-                .map(|agent| agent.status)
-            {
-                self.sync_waiting_agent(pane_id, status);
-            }
+            self.refresh_waiting_for_pane(pane_id);
         }
         if cooperative_ready && !invocation_ended {
             self.deliver_cooperative_instruction(reg, pane_id);
