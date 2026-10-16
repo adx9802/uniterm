@@ -128,3 +128,9 @@ pub(super) const APPROVAL_DIALOGS: &[super::approval::Dialog] = &[super::approva
     allow: &["yes, i trust this folder", "yes, trust this folder"],
     deny: &["no, exit", "no, continue without these permissions"],
 }];
+
+/// What a human types to approve this provider's permission prompt once.
+/// Claude Code's prompt is a numbered menu whose option 1 is "Yes", so the
+/// delegated reply is `1` followed by the usual Enter. Kept beside the
+/// detection rules so nothing outside this module branches on the agent id.
+pub(super) const APPROVAL_REPLY: &str = "1";

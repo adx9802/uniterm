@@ -62,6 +62,7 @@ impl Server {
         });
         self.append_event(crate::eventlog::LogEvent::AgentUnbound { pane: pane_id.0 });
         self.resolve_waiting_for_pane(pane_id, uniterm_core::WaitingResolution::AgentAdvanced);
+        self.disarm_delegation(pane_id, "agent_exited");
         // The agent left the fleet but its pane and the layout are unchanged,
         // so refresh the rails in place rather than clearing the screen.
         self.repaint_chrome_all(reg);
@@ -664,6 +665,7 @@ impl Server {
                         }),
                         details: a.details.clone(),
                         waiting: self.waiting_id_for(pid),
+                        delegated: self.delegated.contains_key(&pid),
                     });
                 }
             }
@@ -712,6 +714,7 @@ impl Server {
                 .and_then(|(_, role)| self.run_graph.role(role).map(|role| role.name.clone())),
             details: a.details.clone(),
             waiting: self.waiting_id_for(pid),
+            delegated: self.delegated.contains_key(&pid),
         })
     }
 
@@ -2060,6 +2063,9 @@ impl Server {
         }
         if identity_changed {
             self.resolve_waiting_for_pane(pane_id, uniterm_core::WaitingResolution::AgentAdvanced);
+            // An arm never survives into a new invocation: the process group
+            // the human consented for is gone.
+            self.disarm_delegation(pane_id, "invocation_changed");
             let current = self
                 .panes
                 .get(&pane_id)
@@ -2175,6 +2181,7 @@ impl Server {
         self.agents
             .send(uniterm_proto::CoreToAgent::PaneClosed { pane: pane_id });
         self.resolve_waiting_for_pane(pane_id, uniterm_core::WaitingResolution::PaneClosed);
+        self.disarm_delegation(pane_id, "pane_closed");
         self.cancel_pane_instructions(pane_id);
         let dev_servers_changed = {
             let before = self.dev_servers.len();

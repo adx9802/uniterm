@@ -441,27 +441,49 @@ impl Server {
                     let _ = set_interest(reg, client, token);
                 }
             }
-            // The wire surface lands before its supervisor; the dispatch is
-            // implemented in the server delegation change.
-            ClientMessage::DelegationArm { .. }
-            | ClientMessage::DelegationDisarm { .. }
-            | ClientMessage::DelegationStatus { .. } => {
+            // The CLI verb is the human's explicit consent, so arming over
+            // the client protocol needs no further confirmation flag.
+            ClientMessage::DelegationArm { pane } => {
+                let (entries, error) = match self.arm_delegation(reg, pane) {
+                    Ok(entry) => (vec![entry], None),
+                    Err((_, message)) => (Vec::new(), Some(message)),
+                };
+                if let Some(client) = self.clients.get_mut(&token) {
+                    client.queue(&encode_frame(&ServerMessage::Delegation { entries, error }));
+                    client.flush();
+                    let _ = set_interest(reg, client, token);
+                }
+            }
+            ClientMessage::DelegationDisarm { pane } => {
+                self.disarm_delegation(pane, "disarmed");
+                let entries = self.delegation_entries(None);
                 if let Some(client) = self.clients.get_mut(&token) {
                     client.queue(&encode_frame(&ServerMessage::Delegation {
-                        entries: Vec::new(),
+                        entries,
+                        error: None,
+                    }));
+                    client.flush();
+                    let _ = set_interest(reg, client, token);
+                }
+            }
+            ClientMessage::DelegationStatus { pane } => {
+                let entries = self.delegation_entries(pane);
+                if let Some(client) = self.clients.get_mut(&token) {
+                    client.queue(&encode_frame(&ServerMessage::Delegation {
+                        entries,
+                        error: None,
                     }));
                     client.flush();
                     let _ = set_interest(reg, client, token);
                 }
             }
             ClientMessage::DelegationExplain { pane } => {
+                let (found, verdict) = self.explain_delegation(pane);
                 if let Some(client) = self.clients.get_mut(&token) {
                     client.queue(&encode_frame(&ServerMessage::DelegationExplained {
                         pane,
-                        found: false,
-                        verdict: uniterm_core::DelegateVerdict::Withhold {
-                            reason: "delegation is not implemented yet".into(),
-                        },
+                        found,
+                        verdict,
                     }));
                     client.flush();
                     let _ = set_interest(reg, client, token);
