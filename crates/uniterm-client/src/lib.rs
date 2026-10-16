@@ -2155,6 +2155,10 @@ fn attach_once(
                                 | ServerMessage::Runs { .. }
                                 | ServerMessage::Artifacts { .. }
                                 | ServerMessage::RunForked(_) => {}
+                                // Delegation replies serve one-shot requests;
+                                // the attach stream never receives them.
+                                ServerMessage::Delegation { .. }
+                                | ServerMessage::DelegationExplained { .. } => {}
                             }
                         }
                         // Keep the overlay on top of any pane repaint

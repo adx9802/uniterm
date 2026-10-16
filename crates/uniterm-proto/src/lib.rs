@@ -316,6 +316,29 @@ pub enum ControlCommand {
         #[serde(default)]
         text: String,
     },
+    /// Arm delegated answering for one agent Pane. Arming hands an approval
+    /// capability to the supervisor, so the caller must state that a human
+    /// confirmed it; an unconfirmed request is refused with
+    /// `confirmation_required` (see [`ControlCommand::ProjectRemove`]).
+    DelegationArm {
+        pane: PaneId,
+        #[serde(default)]
+        confirmed: bool,
+    },
+    /// Stop delegated answering for one Pane.
+    DelegationDisarm {
+        pane: PaneId,
+    },
+    /// List armed delegations; an absent pane scopes to the whole Workspace.
+    DelegationStatus {
+        #[serde(default)]
+        pane: Option<PaneId>,
+    },
+    /// Explain the verdict the delegate would reach for one Pane's active
+    /// waiting item right now, without answering it.
+    DelegationExplain {
+        pane: PaneId,
+    },
     OrchestrationSubmit {
         kind: OrchestrationKind,
         token: u64,
@@ -474,6 +497,17 @@ pub enum ControlResult {
     },
     Waiting {
         items: Vec<WaitingEntry>,
+    },
+    /// Armed delegations matching the request, with hourly budget use.
+    Delegation {
+        entries: Vec<DelegationEntry>,
+    },
+    /// The verdict the delegate would reach for a Pane's active waiting item
+    /// right now, with its reason; nothing is answered.
+    DelegationExplanation {
+        pane: PaneId,
+        found: bool,
+        verdict: uniterm_core::DelegateVerdict,
     },
     Mutation {
         resource: String,
@@ -1405,6 +1439,23 @@ pub enum ClientMessage {
         /// Required only for [`WaitingAction::Answer`].
         text: String,
     },
+    /// Arm delegated answering for one agent Pane. Running the CLI verb is
+    /// the human's explicit consent, so no confirmation flag is carried.
+    DelegationArm {
+        pane: PaneId,
+    },
+    /// Stop delegated answering for one Pane.
+    DelegationDisarm {
+        pane: PaneId,
+    },
+    /// Inspect armed delegations, optionally scoped to one Pane.
+    DelegationStatus {
+        pane: Option<PaneId>,
+    },
+    /// Dry-run the delegation verdict for one Pane's active waiting item.
+    DelegationExplain {
+        pane: PaneId,
+    },
     /// Version 3 orchestration completion contract shared by workflows and relays.
     OrchestrationSubmit {
         kind: OrchestrationKind,
@@ -1959,6 +2010,17 @@ pub enum ServerMessage {
         found: bool,
         accepted: bool,
         items: Vec<WaitingEntry>,
+    },
+    /// Armed delegations and their hourly budget consumption.
+    Delegation {
+        entries: Vec<DelegationEntry>,
+    },
+    /// The verdict the delegate would reach for a Pane's active waiting item
+    /// right now; nothing is answered.
+    DelegationExplained {
+        pane: PaneId,
+        found: bool,
+        verdict: uniterm_core::DelegateVerdict,
     },
     /// A direct Pane stream was established. Geometry remains server-owned;
     /// client resize messages request only a fresh projection.
@@ -2963,6 +3025,21 @@ pub struct WaitingEntry {
     pub tab: u32,
 }
 
+/// Wire projection of one armed delegation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DelegationEntry {
+    pub pane: PaneId,
+    pub agent: String,
+    /// Invocation the arm is scoped to; answers never leak across it.
+    pub invocation: i32,
+    /// Milliseconds timestamp of the arm, for audit display.
+    pub armed_at_ms: u64,
+    /// Approvals typed within the current hourly window.
+    pub answers_used: u16,
+    /// Approvals still permitted within the current hourly window.
+    pub answers_remaining: u16,
+}
+
 /// Wire projection of one queued human instruction.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InstructionEntry {
@@ -3012,7 +3089,7 @@ pub struct DevServerEntry {
 /// Local clients normally come from the same installed binary. SSH bridges
 /// check this explicitly before exposing a remote socket so mismatched bincode
 /// enums fail with a useful error instead of corrupting the terminal stream.
-pub const WIRE_PROTOCOL_VERSION: u32 = 27;
+pub const WIRE_PROTOCOL_VERSION: u32 = 28;
 
 /// Cap for trusted server replies, including full terminal repaints.
 pub const MAX_SERVER_FRAME: u32 = 8 * 1024 * 1024;
@@ -3209,7 +3286,7 @@ mod tests {
 
     #[test]
     fn guardrail_settings_round_trip_on_current_wire_protocol() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 27);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 28);
         let bytes = encode_frame(&ClientMessage::SettingsApply(SettingsPatch {
             guardrail_max_active_runs: Some(4),
             guardrail_max_role_panes: Some(12),
@@ -3231,6 +3308,136 @@ mod tests {
                 ..
             }) if selectors == "api; /work/web"
         ));
+    }
+
+    #[test]
+    fn delegation_surface_round_trips_on_both_protocols() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 28);
+
+        // Binary attach protocol mirrors.
+        let bytes = encode_frame(&ClientMessage::DelegationArm { pane: PaneId(7) });
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&bytes);
+        assert!(matches!(
+            decoder.decode::<ClientMessage>().unwrap().unwrap(),
+            ClientMessage::DelegationArm { pane: PaneId(7) }
+        ));
+
+        let entry = DelegationEntry {
+            pane: PaneId(7),
+            agent: "claude".into(),
+            invocation: 3,
+            armed_at_ms: 42,
+            answers_used: 2,
+            answers_remaining: 28,
+        };
+        decoder.push(&encode_frame(&ServerMessage::Delegation {
+            entries: vec![entry.clone()],
+        }));
+        assert!(matches!(
+            decoder.decode::<ServerMessage>().unwrap().unwrap(),
+            ServerMessage::Delegation { entries } if entries == vec![entry.clone()]
+        ));
+
+        // NDJSON control protocol.
+        let request = ControlRequest {
+            version: CONTROL_API_VERSION,
+            id: 9,
+            workspace: "Work".into(),
+            command: ControlCommand::DelegationArm {
+                pane: PaneId(7),
+                confirmed: true,
+            },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ControlRequest>(&json).unwrap(),
+            request
+        );
+        assert!(json.contains("\"delegation_arm\""));
+
+        let explanation = ControlResult::DelegationExplanation {
+            pane: PaneId(7),
+            found: true,
+            verdict: uniterm_core::DelegateVerdict::Withhold {
+                reason: "no delegation-allow rule matches".into(),
+            },
+        };
+        let response = ControlResponse::ok(9, explanation);
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ControlResponse>(&json).unwrap(),
+            response
+        );
+        assert!(json.contains("\"delegation_explanation\""));
+        assert!(json.contains("\"withhold\""));
+
+        let response = ControlResponse::ok(
+            9,
+            ControlResult::Delegation {
+                entries: vec![entry],
+            },
+        );
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"delegation\""));
+        assert_eq!(
+            serde_json::from_str::<ControlResponse>(&json).unwrap(),
+            response
+        );
+
+        for command in [
+            ControlCommand::DelegationDisarm { pane: PaneId(7) },
+            ControlCommand::DelegationStatus { pane: None },
+            ControlCommand::DelegationExplain { pane: PaneId(7) },
+        ] {
+            let request = ControlRequest {
+                version: CONTROL_API_VERSION,
+                id: 1,
+                workspace: "W".into(),
+                command,
+            };
+            let json = serde_json::to_string(&request).unwrap();
+            assert_eq!(
+                serde_json::from_str::<ControlRequest>(&json).unwrap(),
+                request
+            );
+        }
+        for (bytes, expected) in [
+            (
+                encode_frame(&ClientMessage::DelegationDisarm { pane: PaneId(7) }),
+                "disarm",
+            ),
+            (
+                encode_frame(&ClientMessage::DelegationStatus {
+                    pane: Some(PaneId(7)),
+                }),
+                "status",
+            ),
+            (
+                encode_frame(&ClientMessage::DelegationExplain { pane: PaneId(7) }),
+                "explain",
+            ),
+        ] {
+            let mut decoder = FrameDecoder::new();
+            decoder.push(&bytes);
+            let decoded = decoder.decode::<ClientMessage>().unwrap().unwrap();
+            let matched = matches!(
+                (expected, decoded),
+                (
+                    "disarm",
+                    ClientMessage::DelegationDisarm { pane: PaneId(7) }
+                ) | (
+                    "status",
+                    ClientMessage::DelegationStatus {
+                        pane: Some(PaneId(7))
+                    }
+                ) | (
+                    "explain",
+                    ClientMessage::DelegationExplain { pane: PaneId(7) }
+                )
+            );
+            assert!(matched, "{expected} mirror must round-trip");
+        }
     }
 
     #[test]

@@ -730,6 +730,16 @@ impl Server {
                         },
                     )
                 }
+                // The wire surface lands before its supervisor; the dispatch
+                // is implemented in the server delegation change.
+                ControlCommand::DelegationArm { .. }
+                | ControlCommand::DelegationDisarm { .. }
+                | ControlCommand::DelegationStatus { .. }
+                | ControlCommand::DelegationExplain { .. } => ControlResponse::error(
+                    request.id,
+                    "not_implemented",
+                    "delegation dispatch is not implemented yet",
+                ),
                 ControlCommand::PaneRead { pane, lines } => {
                     let (found, text, truncated) = self
                         .bounded_pane_output(pane, lines)
