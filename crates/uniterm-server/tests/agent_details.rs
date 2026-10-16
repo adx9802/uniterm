@@ -454,6 +454,91 @@ fn hook_details_follow_one_invocation_and_session() {
     assert_ne!(log[rebound]["AgentBound"]["invocation"], invocation);
 }
 
+/// Answering retires the item without a status transition; when the smoothed
+/// status stays Permission across the answer (a screen or title rule keeps
+/// matching, so no transition and no new envelope ever fire), the repeated
+/// identical prompt must still get a fresh waiting item. The resolution path
+/// itself runs the reconciliation pass, synchronously.
+#[test]
+fn an_answered_prompt_whose_status_stays_permission_is_recreated() {
+    isolate_state();
+    let workspace = unique_workspace_name();
+    let dir = common::socket_root().join(format!("uniterm-details-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join(format!("{workspace}.sock"));
+    let files = common::temp_dir("agent-details-pinned-permission");
+    let server_socket = socket.clone();
+    thread::spawn(move || {
+        let (mut server, mut poll) = Server::bind(&server_socket, "/bin/sh", &[], 120, 30).unwrap();
+        let _ = server.run(&mut poll);
+    });
+    let mut control = Control::connect(&socket);
+    let pane = control.request(ControlCommand::PaneList)["panes"][0]["id"]
+        .as_u64()
+        .unwrap();
+    let start = hook_file(&files, "start", session_start("s-1", None));
+    let ask = hook_file(&files, "ask", permission("s-1", "Bash", "git push"));
+    // Nothing cooperative follows the answer: the prompt is re-asked only on
+    // screen, so the pinned Permission status never transitions.
+    std::fs::write(
+        files.join("agent.sh"),
+        format!(
+            "{}; read answer; echo \"GOT:$answer\"; read go",
+            cat(&[start, ask])
+        ),
+    )
+    .unwrap();
+    control.type_line(pane, &format!("sh '{}'", files.join("agent.sh").display()));
+    let agent = control.until("permission", |agent| {
+        agent["status"] == "Permission" && agent["details"]["pending_permission"]["tool"] == "Bash"
+    });
+    let waiting = control.waiting();
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    let id = waiting[0]["id"].as_u64().unwrap();
+    assert_eq!(agent["waiting"], id);
+
+    // `ut waiting answer ID yes` while the status stays Permission.
+    let acted = control.request(ControlCommand::WaitingAct {
+        id,
+        action: uniterm_proto::WaitingAction::Answer,
+        text: "yes".into(),
+    });
+    assert_eq!(acted["accepted"], true, "{acted}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !control.read(pane).contains("GOT:yes") {
+        assert!(Instant::now() < deadline, "answer never reached the prompt");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // No transition and no new envelope followed, yet the repeated identical
+    // prompt has a fresh item: same prompt, new id.
+    assert_eq!(control.agent()["status"], "Permission");
+    let waiting = control.waiting();
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    let recreated = waiting[0]["id"].as_u64().unwrap();
+    assert_ne!(recreated, id);
+    assert!(
+        waiting[0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Bash: git push"),
+        "{waiting:?}"
+    );
+    assert_eq!(control.agent()["waiting"], recreated);
+
+    // The durable log records the retirement and the fresh item adjacently;
+    // the new id means adjacent-duplicate suppression cannot swallow it.
+    let log = events(&socket);
+    let answered = position(&log, 0, |event| {
+        event["WaitingResolved"]["id"] == id && event["WaitingResolved"]["resolution"] == "Answered"
+    });
+    let recreated_at = position(&log, answered, |event| {
+        event["WaitingCreated"]["item"]["id"].as_u64() == Some(recreated)
+    });
+    assert_eq!(recreated_at, answered + 1, "{log:?}");
+    control.type_line(pane, "go");
+}
+
 #[test]
 fn a_detail_only_envelope_never_binds_an_agent() {
     isolate_state();
