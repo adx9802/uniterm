@@ -46,12 +46,17 @@ Rejections return `project_directory_rejected` without changing the root.
 Use absolute paths or `~/` on the Workspace host.
 Existing Panes retain their working directories; new launches use the changed root.
 Registered worktrees and Projects with an active workflow or relay reject directory changes.
-The binary wire version is 26 and the event-envelope schema is 8; older binaries refuse the new durable schema instead of treating an unknown directory-change event as corruption.
+The binary wire version is 28 and the event-envelope schema is 10; older binaries refuse the new durable schema instead of treating an unknown directory-change or delegation event as corruption.
 
 `project_remove` and `agent_stop_all` close every Pane they reach, so they require `"confirmed": true`; the server records the guardrail decision before the first Pane closes and answers an unconfirmed request with the `confirmation_required` error.
 
+`delegation_arm` accepts `{"pane":1,"confirmed":true}` and arms one Pane for delegated answering within the configured policy (see [26-native-workspace-guardrails.md](26-native-workspace-guardrails.md)).
+Arming hands the provider's future approval keystrokes to the server, so the same confirmation contract applies: an unconfirmed request is refused with `confirmation_required` and nothing changes, and a confirmed arm appends `DelegationArmed` before the first verdict runs.
+`delegation_disarm` takes `{"pane":1}` and records `DelegationDisarmed`; `delegation_status` takes an optional `pane` and returns every matching arm with its hourly answers used and remaining; `delegation_explain` takes `{"pane":1}` and returns the verdict the arm would reach for the Pane's active waiting item without changing anything.
+The capabilities are `delegation.arm`, `delegation.status`, and `delegation.explain`.
+
 `ut tab new` and `ut tab rename` are thin CLI verbs over the `tab_create` and `tab_rename` methods, so a script and a control client see the same result.
-The implemented surface exposes `capabilities`, Workspace and hierarchy snapshots, Project and Tab mutations, Pane read, send, and focus, Agent list, launch, focus, and stop, Task mutations, waiting-item actions, instruction operations, worktree lifecycle operations, native run-graph and artifact inspection, native orchestration launch and submission, worktree-backed child Run launch, and event subscriptions.
+The implemented surface exposes `capabilities`, Workspace and hierarchy snapshots, Project and Tab mutations, Pane read, send, and focus, Agent list, launch, focus, and stop, Task mutations, waiting-item actions, delegation arm, disarm, status, and explain, instruction operations, worktree lifecycle operations, native run-graph and artifact inspection, native orchestration launch and submission, worktree-backed child Run launch, and event subscriptions.
 `pane_send` accepts a UTF-8 `text` string so hand-written JSON uses ordinary JSON escapes instead of an integer byte array.
 Pane mutations use the same bounded pane-input function as the binary client protocol.
 

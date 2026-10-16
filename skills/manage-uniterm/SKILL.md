@@ -369,6 +369,20 @@ After Uniterm updates and on local startup or attach, auto-install adds missing 
 Disable auto-install before removing a connector that should stay removed.
 Use `ut agent connector install all` when the human wants an immediate manual install or refresh of all available connectors.
 
+## Delegate permission answers
+
+```sh
+ut delegate arm PANE             # arm one Pane; the verb is the human's consent
+ut delegate status [PANE] --json # armed Panes with answers used and remaining
+ut delegate explain PANE         # the verdict the arm would reach right now
+ut delegate disarm PANE
+```
+
+An armed Pane answers its own permission prompts automatically, but only when the pending tool call passes the configured policy: `delegation-allow` rules in the human's config on top of a compiled-in deny floor, an hourly answer budget that disarms the arm when spent, and a loop guard that withholds an identical re-ask.
+This is the sanctioned exception to the "never send blanket approval keystrokes" rule: the human arms a Pane deliberately, every verdict is recorded in the event log before anything is typed, and the server types the provider's own approval reply through the same guarded path as `ut waiting answer`.
+Never arm a Pane yourself; arming is the human's decision, over the control API it requires `"confirmed": true`, and it never survives a restart, an invocation change, or a Pane close.
+Questions are never delegated, and prompts without structured tool data always stay with the human.
+
 ## Start and coordinate agents
 
 ```sh

@@ -141,6 +141,6 @@ Agent-facing (over the control protocol):
 Scripting and remote:
 
 - `uniterm control` speaks the control protocol for scripts and the future remote surface.
-- structured subcommands to query fleet status, list and resolve waiting-queue items, and launch tasks.
+- structured subcommands to query fleet status, list and resolve waiting-queue items, arm or inspect delegated answering (`ut delegate arm|disarm|status|explain`), and launch tasks.
 
 The design keeps one binary, one socket, one command vocabulary, whether the caller is a person at a prompt, a keybinding, an agent reporting completion, or a remote client.
