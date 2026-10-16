@@ -56,11 +56,12 @@ use overlay::Overlay;
 use projects::{NewProjectView, ProjectsView};
 pub use requests::{
     agent_explain, agent_launch, agent_wait, artifact_list, control, control_request,
-    hierarchy_focus, import_workspace, instruction_add, instruction_cancel, instruction_list,
-    instruction_replace, instruction_send_now, kill_server, orchestration_submit, pane_focus,
-    pane_list, pane_read, pane_send, pane_wait_output, query_info, run_fork, run_list, tab_move,
-    waiting_act, waiting_list, workflow_submit, workspace_request, worktree_request,
-    AgentWaitResult, PaneWaitResult,
+    delegation_arm, delegation_disarm, delegation_explain, delegation_status, hierarchy_focus,
+    import_workspace, instruction_add, instruction_cancel, instruction_list, instruction_replace,
+    instruction_send_now, kill_server, orchestration_submit, pane_focus, pane_list, pane_read,
+    pane_send, pane_wait_output, query_info, run_fork, run_list, tab_move, waiting_act,
+    waiting_list, workflow_submit, workspace_request, worktree_request, AgentWaitResult,
+    PaneWaitResult,
 };
 use sessions::{SessionAction, SessionsState};
 use settings::{SettingsAction, SettingsView};
