@@ -441,6 +441,32 @@ impl Server {
                     let _ = set_interest(reg, client, token);
                 }
             }
+            // The wire surface lands before its supervisor; the dispatch is
+            // implemented in the server delegation change.
+            ClientMessage::DelegationArm { .. }
+            | ClientMessage::DelegationDisarm { .. }
+            | ClientMessage::DelegationStatus { .. } => {
+                if let Some(client) = self.clients.get_mut(&token) {
+                    client.queue(&encode_frame(&ServerMessage::Delegation {
+                        entries: Vec::new(),
+                    }));
+                    client.flush();
+                    let _ = set_interest(reg, client, token);
+                }
+            }
+            ClientMessage::DelegationExplain { pane } => {
+                if let Some(client) = self.clients.get_mut(&token) {
+                    client.queue(&encode_frame(&ServerMessage::DelegationExplained {
+                        pane,
+                        found: false,
+                        verdict: uniterm_core::DelegateVerdict::Withhold {
+                            reason: "delegation is not implemented yet".into(),
+                        },
+                    }));
+                    client.flush();
+                    let _ = set_interest(reg, client, token);
+                }
+            }
             ClientMessage::InstructionList => self.reply_instructions(reg, token),
             ClientMessage::InstructionAdd { pane, author, text } => {
                 let result = self.instruction_command(
