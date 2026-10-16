@@ -585,6 +585,15 @@ impl ObservatoryView {
                 },
             ),
         ]));
+        if entry.delegated {
+            lines.push(styled_line(&[
+                (&panel, "  "),
+                (
+                    &warning,
+                    "Delegated - permission prompts auto-answer within policy",
+                ),
+            ]));
+        }
         lines.push(styled_line(&[]));
         lines.push(styled_line(&[
             (&panel, "  "),

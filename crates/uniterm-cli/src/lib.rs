@@ -162,6 +162,7 @@ pub fn run() -> i32 {
         Some("run" | "runs") => cmd_run(&args[1..]),
         Some("artifact" | "artifacts") => cmd_artifact(&args[1..]),
         Some("waiting" | "wait") => cmd_waiting(&args[1..]),
+        Some("delegate" | "delegation") => cmd_delegate(&args[1..]),
         Some("pane") => cmd_pane(&args[1..]),
         Some("config") => cmd_config(&args[1..]),
         Some("migrate") => cmd_migrate(&args[1..]),
@@ -2087,6 +2088,148 @@ fn cmd_waiting(args: &[String]) -> i32 {
         Some(other) => {
             eprintln!("uniterm waiting: unknown command '{other}'");
             eprintln!("usage: ut waiting <list|focus|answer|dismiss|stop|resume|rollback> ... [-w Workspace]");
+            2
+        }
+    }
+}
+
+fn cmd_delegate(args: &[String]) -> i32 {
+    let (socket, args) = match project_socket(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("uniterm delegate: {error}");
+            return 2;
+        }
+    };
+    let pane_arg = |index: usize, command: &str| -> Option<uniterm_core::PaneId> {
+        let Some(id) = args.get(index).and_then(|value| value.parse::<u64>().ok()) else {
+            eprintln!("uniterm delegate {command}: a numeric Pane id is required");
+            return None;
+        };
+        Some(uniterm_core::PaneId(id))
+    };
+    match args.first().map(String::as_str) {
+        Some("arm") => {
+            let Some(pane) = pane_arg(1, "arm") else {
+                return 2;
+            };
+            // The verb itself is the human's explicit consent: typing
+            // `ut delegate arm` is the confirm step, so the client protocol
+            // carries no further confirmation flag (docs/19).
+            match uniterm_client::delegation_arm(&socket, pane) {
+                Ok(None) => {
+                    println!("Pane {} is armed for delegated answering", pane.0);
+                    0
+                }
+                Ok(Some(reason)) => {
+                    eprintln!("uniterm delegate arm: {reason}");
+                    1
+                }
+                Err(error) => {
+                    eprintln!("uniterm delegate arm: {error}");
+                    1
+                }
+            }
+        }
+        Some("disarm") => {
+            let Some(pane) = pane_arg(1, "disarm") else {
+                return 2;
+            };
+            match uniterm_client::delegation_disarm(&socket, pane) {
+                Ok(_) => {
+                    println!("Pane {} delegation disarmed", pane.0);
+                    0
+                }
+                Err(error) => {
+                    eprintln!("uniterm delegate disarm: {error}");
+                    1
+                }
+            }
+        }
+        None | Some("status" | "ls" | "list") => {
+            let options: &[String] = if args.is_empty() { &args } else { &args[1..] };
+            let pane = options.first().and_then(|value| value.parse::<u64>().ok());
+            let json = options.iter().any(|arg| arg == "--json");
+            if options
+                .iter()
+                .any(|arg| arg != "--json" && arg.parse::<u64>().is_err())
+            {
+                eprintln!("uniterm delegate status: usage: ut delegate status [PANE] [-w Workspace] [--json]");
+                return 2;
+            }
+            match uniterm_client::delegation_status(&socket, pane.map(uniterm_core::PaneId)) {
+                Ok(entries) if json => match serde_json::to_string_pretty(&entries) {
+                    Ok(output) => {
+                        println!("{output}");
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("uniterm delegate status: could not encode JSON: {error}");
+                        1
+                    }
+                },
+                Ok(entries) if entries.is_empty() => {
+                    println!("no armed panes");
+                    0
+                }
+                Ok(entries) => {
+                    for entry in entries {
+                        println!(
+                            "Pane {}\t{}\t{}/{} answers used",
+                            entry.pane.0, entry.agent, entry.answers_used, entry.answers_remaining
+                        );
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("uniterm delegate status: {error}");
+                    1
+                }
+            }
+        }
+        Some("explain") => {
+            let Some(pane) = pane_arg(1, "explain") else {
+                return 2;
+            };
+            let json = args.iter().any(|arg| arg == "--json");
+            match uniterm_client::delegation_explain(&socket, pane) {
+                Ok((found, verdict)) if json => {
+                    let output = serde_json::json!({ "armed": found, "verdict": verdict });
+                    match serde_json::to_string_pretty(&output) {
+                        Ok(output) => {
+                            println!("{output}");
+                            0
+                        }
+                        Err(error) => {
+                            eprintln!("uniterm delegate explain: could not encode JSON: {error}");
+                            1
+                        }
+                    }
+                }
+                Ok((false, _)) => {
+                    println!("Pane {} is not armed for delegated answering", pane.0);
+                    0
+                }
+                Ok((true, verdict)) => {
+                    match verdict {
+                        uniterm_core::DelegateVerdict::Allow => {
+                            println!("Pane {} would auto-answer the active prompt", pane.0);
+                        }
+                        uniterm_core::DelegateVerdict::Withhold { reason } => {
+                            println!("Pane {} would withhold: {reason}", pane.0);
+                        }
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("uniterm delegate explain: {error}");
+                    1
+                }
+            }
+        }
+        Some(other) => {
+            eprintln!("uniterm delegate: unknown command '{other}'");
+            eprintln!("usage: ut delegate <arm|disarm|status|explain> ... [-w Workspace]");
             2
         }
     }
@@ -4276,6 +4419,10 @@ fn print_help_search(query: &str) -> i32 {
         (
             "waiting queue human attention answer dismiss stop resume",
             "ut waiting list|focus|answer|dismiss|stop|resume|rollback ...",
+        ),
+        (
+            "delegation arm auto-answer permission policy budget explain",
+            "ut delegate arm|disarm PANE; ut delegate status [PANE] [--json]; ut delegate explain PANE [--json]",
         ),
         (
             "instruction queue steer direction follow-up replace cancel send now",

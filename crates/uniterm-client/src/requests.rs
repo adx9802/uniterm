@@ -820,6 +820,104 @@ fn waiting_request(
     ))
 }
 
+/// Arm one Pane for delegated answering. `Ok(None)` means armed; a refusal
+/// (no bound agent, unsupported provider) comes back as `Ok(Some(reason))`.
+pub fn delegation_arm(
+    sock_path: &Path,
+    pane: uniterm_core::PaneId,
+) -> std::io::Result<Option<String>> {
+    match delegation_request(sock_path, ClientMessage::DelegationArm { pane })? {
+        DelegationReply::Entries(_, error) => Ok(error),
+        DelegationReply::Explained(..) => unreachable!(),
+    }
+}
+
+/// Disarm one Pane and return the remaining armed entries workspace-wide.
+pub fn delegation_disarm(
+    sock_path: &Path,
+    pane: uniterm_core::PaneId,
+) -> std::io::Result<Vec<uniterm_proto::DelegationEntry>> {
+    match delegation_request(sock_path, ClientMessage::DelegationDisarm { pane })? {
+        DelegationReply::Entries(entries, _) => Ok(entries),
+        DelegationReply::Explained(..) => unreachable!(),
+    }
+}
+
+/// List the delegation arms for one Pane, or the whole Workspace when `pane`
+/// is `None`.
+pub fn delegation_status(
+    sock_path: &Path,
+    pane: Option<uniterm_core::PaneId>,
+) -> std::io::Result<Vec<uniterm_proto::DelegationEntry>> {
+    match delegation_request(sock_path, ClientMessage::DelegationStatus { pane })? {
+        DelegationReply::Entries(entries, _) => Ok(entries),
+        DelegationReply::Explained(..) => unreachable!(),
+    }
+}
+
+/// Explain what delegation would do for one Pane's active waiting item:
+/// `(false, _)` means the Pane is not armed, otherwise the verdict it would
+/// reach right now.
+pub fn delegation_explain(
+    sock_path: &Path,
+    pane: uniterm_core::PaneId,
+) -> std::io::Result<(bool, uniterm_core::DelegateVerdict)> {
+    match delegation_request(sock_path, ClientMessage::DelegationExplain { pane })? {
+        DelegationReply::Explained(found, verdict) => Ok((found, verdict)),
+        DelegationReply::Entries(..) => unreachable!(),
+    }
+}
+
+enum DelegationReply {
+    Entries(Vec<uniterm_proto::DelegationEntry>, Option<String>),
+    Explained(bool, uniterm_core::DelegateVerdict),
+}
+
+fn delegation_request(
+    sock_path: &Path,
+    request: ClientMessage,
+) -> std::io::Result<DelegationReply> {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream as StdUnixStream;
+
+    let mut stream = StdUnixStream::connect(sock_path)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(800)))?;
+    stream.write_all(&encode_frame(&request))?;
+    stream.flush()?;
+    let mut decoder = FrameDecoder::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match std::io::Read::read(&mut stream, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => decoder.push(&buf[..n]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+        while let Ok(Some(message)) = decoder.decode::<ServerMessage>() {
+            match message {
+                ServerMessage::Delegation { entries, error } => {
+                    return Ok(DelegationReply::Entries(entries, error));
+                }
+                ServerMessage::DelegationExplained { found, verdict, .. } => {
+                    return Ok(DelegationReply::Explained(found, verdict));
+                }
+                _ => {}
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "no delegation response",
+    ))
+}
+
 /// Return queued human direction for this Workspace.
 pub fn instruction_list(sock_path: &Path) -> std::io::Result<Vec<uniterm_proto::InstructionEntry>> {
     instruction_request(sock_path, ClientMessage::InstructionList).map(|(_, _, _, items)| items)
