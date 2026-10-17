@@ -1915,11 +1915,12 @@ fn fast_settle_falls_back_to_the_dwell_for_an_outsize_dialog() {
         "start",
         json!({"hook_event_name": "SessionStart", "session_id": "c-1", "cwd": "/tmp/demo"}),
     );
-    // Question on rows 1-2, twenty-three padding rows, then options and
-    // footer at the bottom of the 30-row screen: the bottom-24 dialog
-    // region holds the options and footer but not the question.
+    // Question on rows 1-2, forty padding rows, then options and footer:
+    // at forty-six rows the dialog is taller than the 30-row screen
+    // itself, so even the grown bottom-48 dialog region (the whole grid
+    // here) holds the options and footer but never the question.
     let mut dialog = String::from("  Would you like to run the following command?\n\n");
-    for line in 0..23 {
+    for line in 0..40 {
         dialog.push_str(&format!("  Reason: padding line {line}\n"));
     }
     dialog.push_str(
@@ -1954,5 +1955,98 @@ fn fast_settle_falls_back_to_the_dwell_for_an_outsize_dialog() {
     // permission screen rule, the item surfaces, and the armed Pane gets
     // its bare-Enter approval on the normal path.
     until_file_contains(&answers, "FIRST:");
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn fast_settle_answers_a_tall_dialog_inside_the_grown_region() {
+    // The regression the grown region fixes: a real long-command approval
+    // (codex repeats the command verbatim in its don't-ask-again option,
+    // so a wrapped multi-target command draws a dialog of about
+    // twenty-eight rows) overflowed the old bottom-24 region, its
+    // signature never completed, and every such prompt fell back to the
+    // five-second dwell. A twenty-six-row dialog fits the 30-row screen,
+    // so the whole triple is on the grid; the grown bottom-48 region sees
+    // it and the settle answers well under the dwell.
+    let dir = common::temp_dir("delegation-tall-dialog");
+    let start = codex_hook_file(
+        &dir,
+        "start",
+        json!({"hook_event_name": "SessionStart", "session_id": "c-1", "cwd": "/tmp/demo"}),
+    );
+    // Question on rows 1-2, eighteen reason-shaped padding rows standing
+    // in for the wrapped command and its option repeat, then options and
+    // footer: twenty-six rows, taller than the old 24-row region but
+    // fully on the 30-row grid.
+    let mut dialog = String::from("  Would you like to run the following command?\n\n");
+    for line in 0..18 {
+        dialog.push_str(&format!("  $ git add --verbose-path-{line:02}.rs \\"));
+        dialog.push('\n');
+    }
+    dialog.push_str(
+        "\u{203a} 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel",
+    );
+    let dialog_path = dir.join("dialog");
+    std::fs::write(&dialog_path, dialog).unwrap();
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; read release; printf '\\033[2J\\033[H'; cat '{dialog}'; read first; echo \"FIRST:$first\" >> '{out}'; read go",
+            start = cat(&[start]),
+            dialog = dialog_path.display(),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "c-1");
+    harness.control.arm(harness.pane);
+    harness.control.type_line(harness.pane, "release");
+    let mut seen = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while seen.is_none() {
+        if harness
+            .control
+            .read(harness.pane)
+            .contains("Press enter to confirm")
+        {
+            seen = Some(Instant::now());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the dialog never rendered: {}",
+            harness.control.read(harness.pane)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let seen = seen.unwrap();
+    let content = until_file_contains(&answers, "FIRST:");
+    let answered = seen.elapsed();
+    assert!(
+        answered < Duration::from_secs(1),
+        "a tall dialog that fits the grid took {answered:?} to answer; the grown region regressed toward the 5 s dwell"
+    );
+    assert_eq!(content.trim(), "FIRST:", "{content:?}");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let log = loop {
+        let log = events(&harness.socket);
+        if !decisions(&log).is_empty() {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "decision never recorded");
+        thread::sleep(Duration::from_millis(50));
+    };
+    let records = decisions(&log);
+    assert_eq!(records[0]["record"]["verdict"]["outcome"], "allow");
+    assert!(
+        records[0]["record"]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("git add --verbose-path-"),
+        "the fingerprint identifies the tall dialog: {records:?}"
+    );
     harness.control.type_line(harness.pane, "go");
 }

@@ -79,11 +79,25 @@ const PROMPT_REGION_LINES: usize = 12;
 /// rendered dialog, and a real codex 0.163 approval (title, environment
 /// and reason lines, wrapped command, wrapped options, footer) draws
 /// about seventeen rows, so a twelve-row window saw the options and
-/// footer but never the question and the settle could never arm. A
-/// dialog taller than the region simply never completes its signature
-/// and falls back to the generic dwell; the region is read once per
-/// output batch per armed Pane and once per verdict, never per frame.
-pub(super) const DIALOG_REGION_LINES: usize = 24;
+/// footer but never the question and the settle could never arm.
+///
+/// The bound is sized from measured dialogs, not the minimal one: the
+/// question line must share the region with everything below it, and the
+/// command appears TWICE in a codex dialog (the `$` line and the
+/// don't-ask-again option repeat it verbatim), so height grows at about
+/// two wrapped rows per command row. A short-command approval draws
+/// about twenty rows; a real long-command approval (a `git add` with a
+/// dozen paths, or a multi-target shell line, about nine wrapped command
+/// rows at a 120-column pane) measures twenty-eight rows and sat above
+/// the old twenty-four-row bound, so its signature never completed and
+/// every such prompt fell back to the five-second dwell. Forty-eight
+/// rows covers dialogs with roughly twice the observed command wrap on
+/// any pane tall enough to show them; on a shorter grid the read
+/// saturates at the whole grid, and a dialog taller than the grid (or
+/// this bound) simply never completes its signature and keeps the
+/// dwell fail-safe. The region is read once per output batch per armed
+/// Pane and once per verdict, never per frame.
+pub(super) const DIALOG_REGION_LINES: usize = 48;
 
 /// How long an armed Pane's dialog region must stay byte-stable with the
 /// complete permission dialog on screen before the fast settle evaluates
@@ -741,5 +755,77 @@ impl Server {
             answers_used: used,
             answers_remaining: policy.max_answers_per_hour.saturating_sub(used),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The dialog-region sizing the fast settle stands on, exercised
+    //! against a real grid: a tall-but-on-screen dialog completes the
+    //! provider signature through the grown region, and the fail-safe
+    //! holds when the question line is genuinely off the grid.
+    use super::*;
+
+    /// A codex-shaped approval dialog `padding` rows taller than the
+    /// minimal one: the padding stands in for the wrapped command and its
+    /// verbatim repeat in the don't-ask-again option, which is how real
+    /// long-command approvals grow.
+    fn tall_dialog(padding: usize) -> String {
+        // Fed straight to the Terminal, so lines carry their own carriage
+        // returns (a PTY would add them via ONLCR on the way to the grid).
+        let mut dialog = String::from("  Would you like to run the following command?\r\n\r\n");
+        for line in 0..padding {
+            dialog.push_str(&format!("  $ git add --verbose-path-{line:02}.rs \\\r\n"));
+        }
+        dialog.push_str(
+            "\u{203a} 1. Yes, proceed (y)\r\n  2. No, and tell Codex what to do differently (esc)\r\n\r\n  Press enter to confirm or esc to cancel\r\n",
+        );
+        dialog
+    }
+
+    #[test]
+    fn grown_region_completes_a_tall_dialog_that_fits_the_grid() {
+        // Twenty-eight rows on a thirty-row grid: the shape that measured
+        // twenty-eight rows in a real codex 0.163 long-command approval
+        // and overflowed the old 24-row region into the dwell.
+        let mut term = crate::terminal::Terminal::new(120, 30);
+        term.feed(format!("\u{1b}[2J\u{1b}[H{}", tall_dialog(22)).as_bytes());
+        let region = term.evidence_text(DIALOG_REGION_LINES);
+        assert!(
+            crate::providers::complete_permission_dialog("codex", &region),
+            "a tall dialog fully on the grid must complete its signature: {region:?}"
+        );
+    }
+
+    #[test]
+    fn a_dialog_taller_than_the_grid_keeps_the_dwell_fail_safe() {
+        // Forty-six rows on a thirty-row grid: the anchored question line
+        // scrolled off the top, so no region read can ever complete the
+        // signature and the generic dwell owns the prompt.
+        let mut term = crate::terminal::Terminal::new(120, 30);
+        term.feed(format!("\u{1b}[2J\u{1b}[H{}", tall_dialog(40)).as_bytes());
+        let region = term.evidence_text(DIALOG_REGION_LINES);
+        assert!(
+            !crate::providers::complete_permission_dialog("codex", &region),
+            "a dialog whose question left the grid must never complete: {region:?}"
+        );
+    }
+
+    #[test]
+    fn a_tall_partial_dialog_never_completes_the_signature() {
+        // The same tall shape without its footer is still rendering:
+        // height never substitutes for the complete triple.
+        let mut term = crate::terminal::Terminal::new(120, 30);
+        let mut dialog = String::from("  Would you like to run the following command?\r\n\r\n");
+        for line in 0..22 {
+            dialog.push_str(&format!("  $ git add --verbose-path-{line:02}.rs \\\r\n"));
+        }
+        dialog.push_str("\u{203a} 1. Yes, proceed (y)\r\n  2. No, and tell Codex what to do differently (esc)\r\n");
+        term.feed(format!("\u{1b}[2J\u{1b}[H{dialog}").as_bytes());
+        let region = term.evidence_text(DIALOG_REGION_LINES);
+        assert!(
+            !crate::providers::complete_permission_dialog("codex", &region),
+            "a tall dialog missing its footer must never complete: {region:?}"
+        );
     }
 }
