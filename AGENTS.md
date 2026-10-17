@@ -126,7 +126,8 @@ Run `cargo test --workspace --release` as well when you touch the server or the 
 
 Integration tests must never touch a real Workspace.
 Every test that binds or spawns a server calls `isolate_state()` and uses `unique_workspace_name()` from `tests/common/mod.rs`, and every spawned `ut` gets `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` through `.env`.
-A test run must leave `~/.local/state/uniterm` byte-identical.
+`isolate_state()` also points `XDG_CONFIG_HOME` at a per-binary directory: a settings save resolves it at write time, and without the isolation a test that toggles a sidebar or applies a setting rewrites the developer's real `~/.config/uniterm/uniterm.conf` with the test server's defaults.
+A test run must leave `~/.local/state/uniterm` and `~/.config/uniterm` byte-identical.
 
 ## Cross-platform distribution builds
 

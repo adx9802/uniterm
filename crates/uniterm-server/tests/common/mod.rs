@@ -42,6 +42,13 @@ fn base36(mut value: u128) -> String {
 /// Point durable state at a directory private to this test binary and return
 /// it. Every test in a file calls this first; the path is computed once, so
 /// repeated calls from tests running in parallel set the same value.
+///
+/// Config is isolated alongside state: a server persists settings through
+/// `save_config_atomic`, which resolves `XDG_CONFIG_HOME` at write time, so a
+/// test that drives a settings-bearing command (a sidebar toggle, a Settings
+/// apply) without this rewrites the developer's real
+/// `~/.config/uniterm/uniterm.conf` with the test server's defaults - the
+/// clobber behind the Yolo Mode first-attach incident.
 pub fn isolate_state() -> PathBuf {
     static STATE: OnceLock<PathBuf> = OnceLock::new();
     let state = STATE.get_or_init(|| {
@@ -53,7 +60,25 @@ pub fn isolate_state() -> PathBuf {
     });
     std::fs::create_dir_all(state).unwrap();
     std::env::set_var("XDG_STATE_HOME", state);
+    isolate_config();
     state.clone()
+}
+
+/// Point config at a directory private to this test binary and return it.
+/// Separate from the state root because the server reads this tree at boot
+/// and rewrites it on every settings change, while state is append-mostly.
+pub fn isolate_config() -> PathBuf {
+    static CONFIG: OnceLock<PathBuf> = OnceLock::new();
+    let config = CONFIG.get_or_init(|| {
+        std::env::temp_dir().join(format!(
+            "uniterm-test-config-{}-{}",
+            std::process::id(),
+            nonce()
+        ))
+    });
+    std::fs::create_dir_all(config).unwrap();
+    std::env::set_var("XDG_CONFIG_HOME", config);
+    config.clone()
 }
 
 /// A root for socket paths short enough for `sockaddr_un` on every host.
