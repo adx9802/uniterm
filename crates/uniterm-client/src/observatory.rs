@@ -590,7 +590,7 @@ impl ObservatoryView {
                 (&panel, "  "),
                 (
                     &warning,
-                    "Delegated - permission prompts auto-answer within policy",
+                    "Delegated - permission prompts auto-answer while armed",
                 ),
             ]));
         }

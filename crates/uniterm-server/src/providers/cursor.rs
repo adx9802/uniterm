@@ -92,6 +92,13 @@ pub const MANIFEST: Manifest = Manifest {
 /// nothing outside this module branches on the agent id.
 pub(super) const APPROVAL_REPLY: &str = "y";
 
+/// What a human types to approve this provider's permission prompt and stop
+/// it from asking again. Cursor Agent's prompt offers an "always allow"
+/// key, so the delegated always-reply is `a` followed by the usual Enter. A
+/// prompt variant that does not accept it re-surfaces and gets the plain
+/// yes-reply from then on.
+pub(super) const ALWAYS_REPLY: &str = "a";
+
 pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
     prefix: &[],
     prompt_flag: None,
