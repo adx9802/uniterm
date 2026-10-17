@@ -388,6 +388,57 @@ fn assert_file_stays_absent_for(path: &Path, needle: &str, window: Duration) {
     }
 }
 
+/// Send one Settings patch over the binary attach protocol and return the
+/// server's saved Settings projection: the exact live path the client
+/// Settings surface uses for every row it owns.
+fn settings_apply(
+    socket: &Path,
+    patch: uniterm_proto::SettingsPatch,
+) -> uniterm_proto::SettingsSnapshot {
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .write_all(&uniterm_proto::encode_frame(
+            &uniterm_proto::ClientMessage::Attach {
+                term: "xterm-256color".into(),
+                cols: 80,
+                rows: 24,
+            },
+        ))
+        .unwrap();
+    stream
+        .write_all(&uniterm_proto::encode_frame(
+            &uniterm_proto::ClientMessage::SettingsApply(patch),
+        ))
+        .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut decoder = uniterm_proto::FrameDecoder::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
+        assert!(n > 0, "server closed the attach before answering Settings");
+        decoder.push(&buf[..n]);
+        while let Ok(Some(message)) = decoder.decode::<uniterm_proto::ServerMessage>() {
+            if let uniterm_proto::ServerMessage::Settings {
+                settings,
+                saved,
+                error,
+            } = message
+            {
+                // Attach itself answers with a snapshot; the apply is
+                // acknowledged only after the atomic save round trips.
+                if !saved && error.is_none() {
+                    continue;
+                }
+                assert!(error.is_none(), "settings apply failed: {error:?}");
+                assert!(saved, "settings apply reported unsaved");
+                return *settings;
+            }
+        }
+    }
+}
+
 #[test]
 fn delegated_permission_is_answered_and_audited() {
     let dir = common::temp_dir("delegation-happy");
@@ -832,6 +883,277 @@ fn auto_arm_rearms_a_new_invocation_after_the_previous_exits() {
         "the first arm ended with its invocation: {log:?}"
     );
     harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn yolo_mode_settings_toggle_flips_at_runtime() {
+    // The Settings "Yolo Mode" switch is the `delegation-auto-arm` key
+    // flipped live through the same atomic writer every Settings row uses:
+    // nothing arms retroactively, fresh invocations auto-arm only while it
+    // is on, and turning it off leaves current arms alive - the same
+    // semantics as a config edit plus reload, with no restart.
+    let dir = common::temp_dir("delegation-yolo");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let restart = hook_file(&dir, "restart", session_start("s-2"));
+    let third = hook_file(&dir, "third", session_start("s-3"));
+    // Boot with the key off (the default): the first binding must not arm.
+    let mut harness = harness(&dir, 30, &format!("{}; read go", cat(&[start])));
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    assert!(
+        harness.control.delegation_status().is_empty(),
+        "the key defaults off"
+    );
+
+    // Flip it on at runtime; the saved projection proves the round trip.
+    // The already-bound invocation stays unarmed: no retroactive consent.
+    let snapshot = settings_apply(
+        &harness.socket,
+        uniterm_proto::SettingsPatch {
+            delegation_auto_arm: Some(true),
+            ..Default::default()
+        },
+    );
+    assert!(snapshot.delegation_auto_arm);
+    assert!(
+        harness.control.delegation_status().is_empty(),
+        "the runtime flip armed an already-bound invocation"
+    );
+
+    // A fresh invocation in the same Pane auto-arms with no control request.
+    std::fs::write(
+        harness.files.join("second.sh"),
+        format!("{}; read go", cat(&[restart])),
+    )
+    .unwrap();
+    harness.control.type_line(harness.pane, "go");
+    thread::sleep(Duration::from_millis(200));
+    harness.control.type_line(
+        harness.pane,
+        &format!("sh '{}'", harness.files.join("second.sh").display()),
+    );
+    harness
+        .control
+        .until("rebound", |agent| agent["details"]["session_id"] == "s-2");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while harness.control.delegation_status().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "fresh binding never auto-armed with Yolo Mode on"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // Flip it back off: the live arm survives, and the next fresh binding
+    // does not arm.
+    let snapshot = settings_apply(
+        &harness.socket,
+        uniterm_proto::SettingsPatch {
+            delegation_auto_arm: Some(false),
+            ..Default::default()
+        },
+    );
+    assert!(!snapshot.delegation_auto_arm);
+    assert_eq!(
+        harness.control.delegation_status().len(),
+        1,
+        "turning Yolo Mode off disarmed a live arm"
+    );
+    std::fs::write(
+        harness.files.join("third.sh"),
+        format!("{}; read go", cat(&[third])),
+    )
+    .unwrap();
+    harness.control.type_line(harness.pane, "go");
+    thread::sleep(Duration::from_millis(200));
+    harness.control.type_line(
+        harness.pane,
+        &format!("sh '{}'", harness.files.join("third.sh").display()),
+    );
+    harness.control.until("third binding", |agent| {
+        agent["details"]["session_id"] == "s-3"
+    });
+    let settle = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < settle {
+        assert!(
+            harness.control.delegation_status().is_empty(),
+            "auto-arm fired while Yolo Mode was off"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn yolo_mode_first_attach_reports_the_boot_config_and_open_writes_nothing() {
+    // First-attach and no-op coverage for the Settings "Yolo Mode" switch:
+    // a server booted from a config FILE that carries the user's hand edit
+    // must report the switch ON on the very first attach, merely opening or
+    // refreshing the surface must never rewrite the file, and a patch that
+    // does not name `delegation_auto_arm` must leave the key (and the rest
+    // of the hand-edited file) untouched.
+    isolate_state();
+    let config_root = isolate_config();
+    let config_dir = config_root.join("uniterm");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("uniterm.conf");
+    std::fs::write(
+        &config_file,
+        "default-workspace = main\n\
+         \n\
+         theme = uniterm-dark\n\
+         prefix = C-a\n\
+         scrollback-limit = 10000\n\
+         editor = vi\n\
+         \n\
+         delegation-max-answers-per-hour = 30\n\
+         \n\
+         # Delegation (assistant supervisor) - arm per pane with: ut delegate arm PANE\n\
+         delegation-max-answers-per-hour = 30\n\
+         \n\
+         delegation-auto-arm = on\n",
+    )
+    .unwrap();
+    let written = std::fs::read_to_string(&config_file).unwrap();
+
+    // Boot the way the CLI does: `run_server_with_ready` binds, then applies
+    // `load_config()` over the defaults before serving.
+    let workspace = unique_workspace_name();
+    let dir = common::socket_root().join(format!("uniterm-delegation-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join(format!("{workspace}.sock"));
+    let server_socket = socket.clone();
+    thread::spawn(move || {
+        let (mut server, mut poll) = Server::bind(&server_socket, "/bin/sh", &[], 120, 30).unwrap();
+        server.set_config(uniterm_server::server::load_config());
+        let _ = server.run(&mut poll);
+    });
+    let mut control = Control::connect(&socket);
+    let pane = control.request(ControlCommand::PaneList)["panes"][0]["id"]
+        .as_u64()
+        .unwrap();
+
+    // The first-attach case: the snapshot pushed on attach, before any
+    // Settings request or patch, reports the config file's `on` as ON.
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .write_all(&uniterm_proto::encode_frame(
+            &uniterm_proto::ClientMessage::Attach {
+                term: "xterm-256color".into(),
+                cols: 80,
+                rows: 24,
+            },
+        ))
+        .unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut decoder = uniterm_proto::FrameDecoder::new();
+    let next_settings = |stream: &mut UnixStream,
+                         decoder: &mut uniterm_proto::FrameDecoder|
+     -> (uniterm_proto::SettingsSnapshot, bool, Option<String>) {
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = std::io::Read::read(stream, &mut buf).unwrap();
+            assert!(n > 0, "server closed the attach before a Settings reply");
+            decoder.push(&buf[..n]);
+            while let Ok(Some(message)) = decoder.decode::<uniterm_proto::ServerMessage>() {
+                if let uniterm_proto::ServerMessage::Settings {
+                    settings,
+                    saved,
+                    error,
+                } = message
+                {
+                    return (*settings, saved, error);
+                }
+            }
+        }
+    };
+    let (snapshot, saved, error) = next_settings(&mut stream, &mut decoder);
+    assert!(!saved, "the attach snapshot is not a save acknowledgement");
+    assert!(error.is_none(), "attach snapshot error: {error:?}");
+    assert!(
+        snapshot.delegation_auto_arm,
+        "first attach reported Yolo Mode off for a config file that says on"
+    );
+
+    // The no-op case: opening/refreshing the surface answers from live state
+    // and must not touch the file at all.
+    stream
+        .write_all(&uniterm_proto::encode_frame(
+            &uniterm_proto::ClientMessage::Settings,
+        ))
+        .unwrap();
+    let (snapshot, _, error) = next_settings(&mut stream, &mut decoder);
+    assert!(error.is_none(), "settings refresh error: {error:?}");
+    assert!(snapshot.delegation_auto_arm);
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        std::fs::read_to_string(&config_file).unwrap(),
+        written,
+        "opening the Settings surface rewrote the config file"
+    );
+
+    // Standing consent works from the file boot: a fresh binding arms with
+    // no control request.
+    let files = common::temp_dir("delegation-yolo-boot");
+    let start = hook_file(&files, "start", session_start("s-boot"));
+    std::fs::write(
+        files.join("agent.sh"),
+        format!("{}; read go", cat(&[start])),
+    )
+    .unwrap();
+    control.type_line(pane, &format!("sh '{}'", files.join("agent.sh").display()));
+    control.until("bound", |agent| agent["details"]["session_id"] == "s-boot");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while control.delegation_status().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "a file-booted `delegation-auto-arm = on` never armed a fresh binding"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    control.type_line(pane, "go");
+
+    // The stale-patch case: an apply that does not name the key cannot zero
+    // it, in the reply or on disk, and the merge preserves the hand-edited
+    // lines around it.
+    let (snapshot, saved, error) = {
+        stream
+            .write_all(&uniterm_proto::encode_frame(
+                &uniterm_proto::ClientMessage::SettingsApply(uniterm_proto::SettingsPatch {
+                    scrollback_limit: Some(4_242),
+                    ..Default::default()
+                }),
+            ))
+            .unwrap();
+        // Skip the duplicate focus-style pushes; the apply acknowledgement
+        // arrives only after the atomic save round trips.
+        loop {
+            let (snapshot, saved, error) = next_settings(&mut stream, &mut decoder);
+            if saved || error.is_some() {
+                break (snapshot, saved, error);
+            }
+        }
+    };
+    assert!(error.is_none(), "unrelated patch failed: {error:?}");
+    assert!(saved, "unrelated patch was not persisted");
+    assert!(
+        snapshot.delegation_auto_arm,
+        "an unrelated patch flipped Yolo Mode off in the live projection"
+    );
+    let settled = std::fs::read_to_string(&config_file).unwrap();
+    assert!(
+        uniterm_core::Config::parse(&settled).delegation_auto_arm,
+        "an unrelated patch rewrote the file's delegation-auto-arm key: {settled}"
+    );
+    assert!(
+        settled.contains("# Delegation (assistant supervisor)")
+            && settled.contains("default-workspace = main"),
+        "the atomic save dropped hand-edited lines: {settled}"
+    );
 }
 
 #[test]

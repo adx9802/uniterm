@@ -417,6 +417,7 @@ Uniterm validates each executable on the runtime's `PATH` before saving the sett
 When `confirm-close` is enabled, closing a Pane or Tab opens a shared confirmation surface before terminating its process.
 Agent attention notifications wait for a stable status before delivery and are canceled if the agent moves on first.
 The `system` channel prefers `terminal-notifier` and falls back to built-in AppleScript on macOS; on Linux it uses `notify-send` when a graphical session and the helper are available.
+The Guardrails group holds the "Yolo Mode" switch ("auto type A or Y"), the live form of the `delegation-auto-arm` key: while it is on, every fresh binding of a supported provider arms delegated answering as standing consent, and turning it off stops future auto-arms but leaves current arms alive.
 Each notice can also be heard: `notification-sound` is the terminal bell by default, `chime` plays a short two-tone clip that Uniterm synthesizes in code (no audio file to find or ship), and `file` plays your own audio file named by `notification-sound-file`.
 The sound is chosen by the Workspace but played by the attached client, so a Workspace on a remote host chimes on the machine you are sitting at.
 Attention always sounds; a completion stays quiet when the agent's Pane is the one you are already looking at in a focused terminal.

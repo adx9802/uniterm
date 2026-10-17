@@ -1453,6 +1453,7 @@ impl Server {
             guardrail_max_iterations: self.config.guardrails.max_iterations,
             guardrail_max_elapsed_minutes: self.config.guardrails.max_elapsed_seconds / 60,
             guardrail_allowed_projects: self.config.guardrail_allowed_projects_text(),
+            delegation_auto_arm: self.config.delegation_auto_arm,
             editor: self.config.editor.clone(),
             editor_rules: self.config.editor_rules_text(),
         }
@@ -2202,6 +2203,14 @@ impl Server {
         }
         if let Some(selectors) = guardrail_allowed_projects {
             self.config.guardrail_allowed_projects = selectors;
+        }
+        if let Some(arm) = patch.delegation_auto_arm {
+            // The Settings "Yolo Mode" switch flips standing consent live,
+            // with the same semantics as a config edit plus reload: nothing
+            // arms or disarms retroactively - existing arms are untouched,
+            // fresh invocations auto-arm only while this is on, and turning
+            // it off stops future auto-arms but leaves current arms alive.
+            self.config.delegation_auto_arm = arm;
         }
         if self.file_manager_visible() {
             self.sync_file_manager(false);

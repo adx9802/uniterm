@@ -375,6 +375,7 @@ fn snapshot() -> SettingsSnapshot {
         guardrail_max_iterations: 3,
         guardrail_max_elapsed_minutes: 120,
         guardrail_allowed_projects: "api; /work/web".into(),
+        delegation_auto_arm: false,
         editor: "vi".into(),
         editor_rules: "md=glow".into(),
     }

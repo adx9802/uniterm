@@ -46,7 +46,7 @@ Rejections return `project_directory_rejected` without changing the root.
 Use absolute paths or `~/` on the Workspace host.
 Existing Panes retain their working directories; new launches use the changed root.
 Registered worktrees and Projects with an active workflow or relay reject directory changes.
-The binary wire version is 29 and the event-envelope schema is 10; older binaries refuse the new durable schema instead of treating an unknown directory-change or delegation event as corruption.
+The binary wire version is 30 and the event-envelope schema is 10; older binaries refuse the new durable schema instead of treating an unknown directory-change or delegation event as corruption.
 
 `project_remove` and `agent_stop_all` close every Pane they reach, so they require `"confirmed": true`; the server records the guardrail decision before the first Pane closes and answers an unconfirmed request with the `confirmation_required` error.
 

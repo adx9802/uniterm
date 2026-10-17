@@ -73,4 +73,5 @@ delegation-max-answers-per-hour = 30 # 1..240, default 30
 
 Arming a pane (`ut delegate arm PANE`) approves every permission prompt that invocation raises, structured or screen-detected; there is no command allowlist or deny floor, so the arm is the whole consent.
 When the hourly budget is spent the arm disarms itself until the human re-arms, and with `delegation-auto-arm` on every fresh binding of a provider with a verified approval reply arms itself as standing consent - but a budget-spent arm is never re-armed inside the same invocation.
+The client Settings surface exposes `delegation-auto-arm` as the "Yolo Mode" switch ("auto type A or Y") and flips it live on the running server through the same atomic settings save as every other row: nothing arms retroactively, existing arms survive the flip off, and fresh invocations auto-arm only while it is on.
 `ut config check` reports every delegation key problem as an error, and the retired `delegation-allow` key is diagnosed as an unknown key, so an old config cannot look like it still gates approvals.
