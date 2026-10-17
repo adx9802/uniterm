@@ -562,7 +562,7 @@ impl Server {
                     }
                 }
                 if delivery.first_delivery {
-                    self.bind_agent(delivery.pane, &delivery.agent_id);
+                    self.bind_agent(reg, delivery.pane, &delivery.agent_id);
                 }
                 let waiting_kind = match delivery.kind {
                     uniterm_proto::OrchestrationKind::Workflow => {
@@ -1344,7 +1344,7 @@ impl Server {
                 }
                 if accepted && first_delivery {
                     relay.started[role] = true;
-                    self.bind_agent(pane_id, &provider.id);
+                    self.bind_agent(reg, pane_id, &provider.id);
                 } else if !accepted {
                     self.schedule_prompt_retry(PendingPromptDelivery {
                         kind: uniterm_proto::OrchestrationKind::Relay,
@@ -1499,7 +1499,7 @@ impl Server {
                 }
                 if accepted && first_delivery {
                     wf.started[role] = true;
-                    self.bind_agent(pane_id, &provider.id);
+                    self.bind_agent(reg, pane_id, &provider.id);
                     self.full_repaint_all(reg);
                 } else if !accepted {
                     self.schedule_prompt_retry(PendingPromptDelivery {

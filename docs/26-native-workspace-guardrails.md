@@ -83,7 +83,8 @@ It adds no credential proxy, inference gateway, cloud runner, or third-party pro
 
 Delegated answering (`ut delegate arm`) is not an exception to that limit and changes nothing about it.
 Interception would mean sitting inside the provider's tool-call path and rewriting or blocking its operations; Uniterm never enters that path.
-Delegation types the provider's own approval reply into the pane through the same guarded terminal delivery a human answer uses, only after the pure policy in `uniterm-core` allows the pending tool call, and every verdict is an append-only `DelegationDecision` recorded before the first byte moves.
+Delegation types the provider's own approval reply into the pane through the same guarded terminal delivery a human answer uses, once the human has armed that pane's current invocation (explicitly, or by the `delegation-auto-arm` standing consent), and every verdict is an append-only `DelegationDecision` recorded before the first byte moves.
+The hourly answer budget disarms a spent arm, and the loop guard withholds an identical re-ask that comes straight back after a plain yes.
 The provider still shows its prompt, still owns the operation, and still executes exactly what it asked about; the only difference is whose fingers pressed the approval key.
 
 Token and cost budgets remain disabled.

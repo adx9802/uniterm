@@ -3097,7 +3097,7 @@ pub struct DevServerEntry {
 /// Local clients normally come from the same installed binary. SSH bridges
 /// check this explicitly before exposing a remote socket so mismatched bincode
 /// enums fail with a useful error instead of corrupting the terminal stream.
-pub const WIRE_PROTOCOL_VERSION: u32 = 28;
+pub const WIRE_PROTOCOL_VERSION: u32 = 29;
 
 /// Cap for trusted server replies, including full terminal repaints.
 pub const MAX_SERVER_FRAME: u32 = 8 * 1024 * 1024;
@@ -3294,7 +3294,7 @@ mod tests {
 
     #[test]
     fn guardrail_settings_round_trip_on_current_wire_protocol() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 28);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 29);
         let bytes = encode_frame(&ClientMessage::SettingsApply(SettingsPatch {
             guardrail_max_active_runs: Some(4),
             guardrail_max_role_panes: Some(12),
@@ -3320,7 +3320,7 @@ mod tests {
 
     #[test]
     fn delegation_surface_round_trips_on_both_protocols() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 28);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 29);
 
         // Binary attach protocol mirrors.
         let bytes = encode_frame(&ClientMessage::DelegationArm { pane: PaneId(7) });
@@ -3347,6 +3347,26 @@ mod tests {
             decoder.decode::<ServerMessage>().unwrap().unwrap(),
             ServerMessage::Delegation { entries, error: None } if entries == vec![entry.clone()]
         ));
+
+        // The explain reply carries a verdict, and the verdict must decode
+        // over bincode: serde's internally-tagged enums cannot (they need
+        // `deserialize_any`), which once dropped every explain reply.
+        for verdict in [
+            uniterm_core::DelegateVerdict::Allow,
+            uniterm_core::DelegateVerdict::Withhold {
+                reason: "the hourly answer budget is exhausted; re-arm to resume".into(),
+            },
+        ] {
+            decoder.push(&encode_frame(&ServerMessage::DelegationExplained {
+                pane: PaneId(7),
+                found: true,
+                verdict: verdict.clone(),
+            }));
+            assert!(matches!(
+                decoder.decode::<ServerMessage>().unwrap().unwrap(),
+                ServerMessage::DelegationExplained { pane: PaneId(7), found: true, verdict: decoded } if decoded == verdict
+            ));
+        }
 
         // NDJSON control protocol.
         let request = ControlRequest {

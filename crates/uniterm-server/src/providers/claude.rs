@@ -118,3 +118,10 @@ pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
 /// delegated reply is `1` followed by the usual Enter. Kept beside the
 /// detection rules so nothing outside this module branches on the agent id.
 pub(super) const APPROVAL_REPLY: &str = "1";
+
+/// What a human types to approve this provider's permission prompt and stop
+/// it from asking again. Claude Code's menu option 2 is
+/// "Yes, and don't ask again", so the delegated always-reply is `2` followed
+/// by the usual Enter. A prompt variant that does not accept it re-surfaces
+/// and gets the plain yes-reply from then on.
+pub(super) const ALWAYS_REPLY: &str = "2";

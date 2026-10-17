@@ -8,8 +8,7 @@
 
 use crate::{
     delegate::{
-        CommandRule, DelegationPolicy, DELEGATION_DEFAULT_ANSWERS_PER_HOUR,
-        DELEGATION_MAX_ANSWERS_PER_HOUR, DELEGATION_MAX_RULES,
+        DelegationPolicy, DELEGATION_DEFAULT_ANSWERS_PER_HOUR, DELEGATION_MAX_ANSWERS_PER_HOUR,
     },
     guardrail::{
         GuardLimits, GUARDRAIL_MAX_ACTIVE_RUNS, GUARDRAIL_MAX_ELAPSED_SECONDS,
@@ -512,12 +511,13 @@ pub struct Config {
     /// Exact Project names or canonical roots allowed to host native runs.
     /// Empty means all Projects owned by this Workspace.
     pub guardrail_allowed_projects: Vec<String>,
-    /// Commands an armed Pane's delegated answering may approve. Empty (the
-    /// default) delegates nothing; the compiled-in deny floor still applies
-    /// to every entry (`docs/06-agentic-supervision.md`).
-    pub delegation_allow: Vec<CommandRule>,
+    /// Standing consent for delegated answering: every newly bound agent
+    /// invocation whose provider has a verified approval reply is armed
+    /// automatically, without a per-pane `ut delegate arm`. Off by default;
+    /// the manual arm surface is unchanged either way.
+    pub delegation_auto_arm: bool,
     /// Hourly auto-answer budget per armed Pane before delegation disarms
-    /// itself and hands prompts back to the human.
+    /// itself and hands every prompt back to the human.
     pub delegation_max_answers_per_hour: u16,
     /// User overrides keyed by the byte that follows the prefix.
     pub bindings: Vec<KeyBinding>,
@@ -553,7 +553,7 @@ impl Default for Config {
             copy_on_select: true,
             guardrails: GuardLimits::default(),
             guardrail_allowed_projects: Vec::new(),
-            delegation_allow: Vec::new(),
+            delegation_auto_arm: false,
             delegation_max_answers_per_hour: DELEGATION_DEFAULT_ANSWERS_PER_HOUR,
             bindings: Vec::new(),
         }
@@ -678,15 +678,7 @@ impl Config {
                         c.guardrail_allowed_projects.push(val.to_string());
                     }
                 }
-                "delegation-allow" => {
-                    if let Ok(rule) = CommandRule::parse(val) {
-                        if c.delegation_allow.len() < DELEGATION_MAX_RULES
-                            && !c.delegation_allow.contains(&rule)
-                        {
-                            c.delegation_allow.push(rule);
-                        }
-                    }
-                }
+                "delegation-auto-arm" => set_bool(&mut c.delegation_auto_arm, val),
                 "delegation-max-answers-per-hour" => {
                     if let Ok(value) = val.parse::<u16>() {
                         if (1..=DELEGATION_MAX_ANSWERS_PER_HOUR).contains(&value) {
@@ -756,7 +748,6 @@ impl Config {
     pub fn diagnostics(text: &str) -> Vec<ConfigDiagnostic> {
         let mut diagnostics = Vec::new();
         let mut allowed_project_count = 0usize;
-        let mut delegation_rule_count = 0usize;
         for (index, raw) in text.lines().enumerate() {
             let line_number = index + 1;
             let line = raw.trim();
@@ -776,9 +767,6 @@ impl Config {
             if key == "guardrail-allowed-project" {
                 allowed_project_count += 1;
             }
-            if key == "delegation-allow" {
-                delegation_rule_count += 1;
-            }
             let problem = match key {
                 "prefix" if parse_key(value).is_none() => Some("expected a key like C-a".into()),
                 "status"
@@ -793,9 +781,20 @@ impl Config {
                 | "pane-right-click"
                 | "freeze-on-select"
                 | "copy-on-select"
+                | "delegation-auto-arm"
                     if parse_bool_checked(value).is_none() =>
                 {
                     Some("expected true/false, on/off, yes/no, or 1/0".into())
+                }
+                "delegation-max-answers-per-hour"
+                    if !matches!(
+                        value.parse::<u16>(),
+                        Ok(value) if (1..=DELEGATION_MAX_ANSWERS_PER_HOUR).contains(&value)
+                    ) =>
+                {
+                    Some(format!(
+                        "expected an integer from 1 to {DELEGATION_MAX_ANSWERS_PER_HOUR}"
+                    ))
                 }
                 "status-position"
                     if !value.eq_ignore_ascii_case("top")
@@ -865,22 +864,6 @@ impl Config {
                         "at most {GUARDRAIL_MAX_PROJECT_SELECTORS} allowed Projects may be configured"
                     ))
                 }
-                "delegation-allow" if CommandRule::parse(value).is_err() => Some(
-                    "expected a command name followed by optional plain argument words".into(),
-                ),
-                "delegation-allow" if delegation_rule_count > DELEGATION_MAX_RULES => Some(
-                    format!("at most {DELEGATION_MAX_RULES} delegation rules may be configured"),
-                ),
-                "delegation-max-answers-per-hour"
-                    if !matches!(
-                        value.parse::<u16>(),
-                        Ok(value) if (1..=DELEGATION_MAX_ANSWERS_PER_HOUR).contains(&value)
-                    ) =>
-                {
-                    Some(format!(
-                        "expected an integer from 1 to {DELEGATION_MAX_ANSWERS_PER_HOUR}"
-                    ))
-                }
                 "theme" if !is_theme_name(value) => Some(format!("unknown theme '{value}'")),
                 "notifications" | "notification-delivery"
                     if !matches!(
@@ -946,7 +929,7 @@ impl Config {
                 | "guardrail-max-iterations"
                 | "guardrail-max-elapsed-minutes"
                 | "guardrail-allowed-project"
-                | "delegation-allow"
+                | "delegation-auto-arm"
                 | "delegation-max-answers-per-hour"
                 | "editor"
                 | "status-bg"
@@ -994,6 +977,7 @@ guardrail-max-active-runs = {}\n\
 guardrail-max-role-panes = {}\n\
 guardrail-max-iterations = {}\n\
 guardrail-max-elapsed-minutes = {}\n\
+delegation-auto-arm = {}\n\
 delegation-max-answers-per-hour = {}\n\
 scrollback-limit = {}\n\
 restore = {}\n\
@@ -1026,6 +1010,7 @@ editor = {}\n",
             self.guardrails.max_role_panes,
             self.guardrails.max_iterations,
             self.guardrails.max_elapsed_seconds / 60,
+            bool_name(self.delegation_auto_arm),
             self.delegation_max_answers_per_hour,
             self.scrollback_limit,
             bool_name(self.restore),
@@ -1035,16 +1020,6 @@ editor = {}\n",
             text.push_str(&format!(
                 "guardrail-allowed-project = {}\n",
                 config_value_text(selector)
-            ));
-        }
-        for rule in &self.delegation_allow {
-            let value = match &rule.arg_prefix {
-                Some(prefix) => format!("{} {}", rule.program, prefix),
-                None => rule.program.clone(),
-            };
-            text.push_str(&format!(
-                "delegation-allow = {}\n",
-                config_value_text(&value)
             ));
         }
         for rule in &self.editor_rules {
@@ -1064,11 +1039,10 @@ editor = {}\n",
         text
     }
 
-    /// The delegation policy this config permits. The allowlist may be empty
-    /// (delegation then approves nothing) but the budget is always bounded.
+    /// The delegation policy this config permits: the hourly auto-answer
+    /// budget, always bounded.
     pub fn delegation_policy(&self) -> DelegationPolicy {
         DelegationPolicy {
-            allow: self.delegation_allow.clone(),
             max_answers_per_hour: self.delegation_max_answers_per_hour,
         }
     }
@@ -1446,69 +1420,80 @@ guardrail-allowed-project = api\n";
     }
 
     #[test]
-    fn delegation_keys_parse_dedupe_and_round_trip() {
-        let text = "delegation-allow = cargo test\n\
-delegation-allow = git status\n\
-delegation-allow = cargo test\n\
-delegation-max-answers-per-hour = 12\n";
-        let config = Config::parse(text);
-        assert_eq!(
-            config.delegation_allow,
-            vec![
-                CommandRule {
-                    program: "cargo".into(),
-                    arg_prefix: Some("test".into()),
-                },
-                CommandRule {
-                    program: "git".into(),
-                    arg_prefix: Some("status".into()),
-                },
-            ]
-        );
-        assert_eq!(config.delegation_max_answers_per_hour, 12);
-        let policy = config.delegation_policy();
-        assert!(policy.validate().is_ok());
-        assert_eq!(policy.allow, config.delegation_allow);
-        assert_eq!(policy.max_answers_per_hour, 12);
+    fn delegation_auto_arm_defaults_off_parses_and_round_trips() {
+        // Standing consent is opt-in: the default keeps the manual
+        // `ut delegate arm` surface as the only arming path.
+        assert!(!Config::default().delegation_auto_arm);
+        assert!(Config::parse("delegation-auto-arm = on\n").delegation_auto_arm);
+        assert!(!Config::parse("delegation-auto-arm = off\n").delegation_auto_arm);
+        let config = Config::parse("delegation-auto-arm = yes\n");
+        assert!(config.delegation_auto_arm);
         assert!(Config::diagnostics(&config.to_text()).is_empty());
         assert_eq!(Config::parse(&config.to_text()), config);
     }
 
     #[test]
-    fn delegation_defaults_delegate_nothing() {
-        let config = Config::default();
-        assert!(config.delegation_allow.is_empty());
-        assert_eq!(
-            config.delegation_max_answers_per_hour,
-            DELEGATION_DEFAULT_ANSWERS_PER_HOUR
+    fn invalid_delegation_auto_arm_fails_closed_and_is_diagnosed() {
+        let text = "delegation-auto-arm = sometimes\n";
+        assert!(!Config::parse(text).delegation_auto_arm);
+        let diagnostics = Config::diagnostics(text);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 1);
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("expected true/false, on/off, yes/no, or 1/0"),
+            "{diagnostics:?}"
         );
     }
 
     #[test]
-    fn invalid_delegation_values_fail_closed_and_are_diagnosed() {
-        let text = "delegation-allow = cargo; rm\n\
-delegation-allow = cargo test\n\
-delegation-max-answers-per-hour = 0\n\
-delegation-max-answers-per-hour = 241\n";
+    fn delegation_budget_defaults_parses_and_round_trips() {
+        let config = Config::default();
+        assert_eq!(
+            config.delegation_max_answers_per_hour,
+            DELEGATION_DEFAULT_ANSWERS_PER_HOUR
+        );
+        assert!(config.delegation_policy().validate().is_ok());
+        let config = Config::parse("delegation-max-answers-per-hour = 12\n");
+        assert_eq!(config.delegation_max_answers_per_hour, 12);
+        assert_eq!(config.delegation_policy().max_answers_per_hour, 12);
+        assert!(Config::diagnostics(&config.to_text()).is_empty());
+        assert_eq!(Config::parse(&config.to_text()), config);
+    }
+
+    #[test]
+    fn invalid_delegation_budget_fails_closed_and_is_diagnosed() {
+        let text = "delegation-max-answers-per-hour = 0\ndelegation-max-answers-per-hour = 241\n";
         let config = Config::parse(text);
-        // The malformed rule is dropped; the valid one survives.
-        assert_eq!(config.delegation_allow.len(), 1);
         assert_eq!(
             config.delegation_max_answers_per_hour,
             DELEGATION_DEFAULT_ANSWERS_PER_HOUR
         );
         let diagnostics = Config::diagnostics(text);
-        assert_eq!(
-            diagnostics.iter().map(|item| item.line).collect::<Vec<_>>(),
-            vec![1, 3, 4]
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.message.contains("expected an integer from 1 to")),
+            "{diagnostics:?}"
         );
-        let over = (0..=DELEGATION_MAX_RULES)
-            .map(|index| format!("delegation-allow = program-{index}\n"))
-            .collect::<String>();
-        assert!(Config::diagnostics(&over)
-            .iter()
-            .any(|problem| problem.message.contains("at most")));
-        assert!(Config::parse(&over).delegation_allow.len() <= DELEGATION_MAX_RULES);
+    }
+
+    #[test]
+    fn removed_delegation_keys_are_diagnosed_as_unknown() {
+        // The retired allowlist key is diagnosed, not silently ignored: a
+        // config that once gated approvals must visibly say it no longer
+        // does.
+        let key = "delegation-allow = cargo test\n";
+        let diagnostics = Config::diagnostics(key);
+        assert_eq!(diagnostics.len(), 1, "{key}");
+        assert!(
+            diagnostics[0].message.contains("unknown key"),
+            "{diagnostics:?}"
+        );
+        // The forgiving runtime parser ignores it, leaving defaults.
+        assert_eq!(Config::parse(key), Config::default());
     }
 
     #[test]

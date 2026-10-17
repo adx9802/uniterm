@@ -63,16 +63,14 @@ The complete schema, source precedence, verified cache, last-known-good, and rel
 
 ## Delegated answering
 
-Two keys bound what an armed pane may auto-approve (see [06-agentic-supervision.md](06-agentic-supervision.md)):
+Two keys govern delegated answering (see [06-agentic-supervision.md](06-agentic-supervision.md)):
 
 ```ini
 # ~/.config/uniterm/uniterm.conf
-delegation-allow = git status        # repeatable: program plus optional argument prefix
-delegation-allow = cargo test
+delegation-auto-arm = off # default off
 delegation-max-answers-per-hour = 30 # 1..240, default 30
 ```
 
-`delegation-allow` is an allowlist on top of a compiled-in deny floor, not a replacement for it: privilege escalation, network actors, destructive filesystem and git operations, credential and dotfile paths, shell substitution or chaining, and any path escaping the pane's Project root withhold no matter what is configured.
-A rule matches when the pending tool call's program equals the rule's program and its arguments start with the rule's argument prefix on a shell-word boundary, and every path-like argument must resolve inside the Project root.
-At most 64 rules of 256 bytes each are kept; extras are diagnosed and dropped.
-When the hourly budget is spent the arm disarms itself until the human re-arms, and `ut config check` reports every delegation key problem as an error.
+Arming a pane (`ut delegate arm PANE`) approves every permission prompt that invocation raises, structured or screen-detected; there is no command allowlist or deny floor, so the arm is the whole consent.
+When the hourly budget is spent the arm disarms itself until the human re-arms, and with `delegation-auto-arm` on every fresh binding of a provider with a verified approval reply arms itself as standing consent - but a budget-spent arm is never re-armed inside the same invocation.
+`ut config check` reports every delegation key problem as an error, and the retired `delegation-allow` key is diagnosed as an unknown key, so an old config cannot look like it still gates approvals.

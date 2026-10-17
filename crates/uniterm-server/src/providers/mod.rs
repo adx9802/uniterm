@@ -208,6 +208,20 @@ pub(crate) fn approval_reply(id: &str) -> Option<&'static str> {
     }
 }
 
+/// Provider-owned reply that approves its own permission prompt and asks it
+/// not to ask again (Claude Code's menu option 2, Cursor Agent's `a`).
+/// `None` means the provider has no verified don't-ask-again option (Codex
+/// confirms with a bare Enter only), so the first answer falls back to the
+/// plain approval reply. An always-reply implies an approval reply; the
+/// data stays in each provider module beside its detection rules.
+pub(crate) fn always_reply(id: &str) -> Option<&'static str> {
+    match id {
+        "claude" => Some(claude::ALWAYS_REPLY),
+        "cursor" => Some(cursor::ALWAYS_REPLY),
+        _ => None,
+    }
+}
+
 /// Construct argv without passing prompt text through an option parser as flags.
 pub(crate) fn launch_argv(
     id: &str,
@@ -1776,18 +1790,32 @@ mod tests {
         assert_eq!(approval_reply("claude"), Some("1"));
         assert_eq!(approval_reply("codex"), Some(""));
         assert_eq!(approval_reply("cursor"), Some("y"));
+        // Each always-reply is the provider's own don't-ask-again option:
+        // Claude Code's menu option 2, Cursor Agent's `a`. Codex confirms
+        // with a bare Enter only, so it has no always-reply and its first
+        // answer falls back to the plain approval reply.
+        assert_eq!(always_reply("claude"), Some("2"));
+        assert_eq!(always_reply("codex"), None);
+        assert_eq!(always_reply("cursor"), Some("a"));
         // Every other provider withholds until its approval contract is
         // verified; delegation never guesses a keystroke.
         for provider in uniterm_core::agent::PROVIDERS {
             if !matches!(provider.id, "claude" | "codex" | "cursor") {
                 assert_eq!(approval_reply(provider.id), None, "{}", provider.id);
+                assert_eq!(always_reply(provider.id), None, "{}", provider.id);
             }
         }
-        // A reply never smuggles control bytes; Enter comes from the shared
-        // paste path's submit, not from the data.
-        for id in ["claude", "codex", "cursor"] {
-            let reply = approval_reply(id).unwrap();
-            assert!(!reply.chars().any(char::is_control), "{id}");
+        // An always-reply implies an approval reply, and neither smuggles
+        // control bytes; Enter comes from the shared paste path's submit,
+        // not from the data.
+        for provider in uniterm_core::agent::PROVIDERS {
+            if let Some(always) = always_reply(provider.id) {
+                assert!(approval_reply(provider.id).is_some(), "{}", provider.id);
+                assert!(!always.chars().any(char::is_control), "{}", provider.id);
+            }
+            if let Some(reply) = approval_reply(provider.id) {
+                assert!(!reply.chars().any(char::is_control), "{}", provider.id);
+            }
         }
     }
 

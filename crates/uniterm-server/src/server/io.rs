@@ -172,6 +172,7 @@ impl Server {
         let mut eof = false;
         let mut read_budget_spent = false;
         let mut agent_changed = false;
+        let mut agent_freshly_bound = false;
         let mut agent_transitions = Vec::new();
         let mut cooperative_ready = false;
         let mut invocation_ended = false;
@@ -369,6 +370,7 @@ impl Server {
                             resume_command: Vec::new(),
                             details: uniterm_core::AgentDetails::new(foreground),
                         });
+                        agent_freshly_bound = true;
                     }
                 }
                 let Some(pa) = pane.agent.as_mut() else {
@@ -546,6 +548,16 @@ impl Server {
             // shown refreshes the existing item in place: same id, no churn.
             // A new invocation that is already blocked gets its own item.
             self.refresh_waiting_for_pane(pane_id);
+        }
+        if agent_freshly_bound {
+            // An arm never survives into a new invocation: the process group
+            // the human consented for is gone (the detection path's
+            // invocation_changed disarm is the other half of this rule).
+            self.disarm_delegation(pane_id, "invocation_changed");
+            // Standing consent (`delegation-auto-arm`) arms the new
+            // invocation immediately; the config key is the human's
+            // confirmation for this path.
+            self.maybe_auto_arm_delegation(reg, pane_id);
         }
         if cooperative_ready && !invocation_ended {
             self.deliver_cooperative_instruction(reg, pane_id);

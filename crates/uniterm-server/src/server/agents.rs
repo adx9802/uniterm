@@ -74,7 +74,7 @@ impl Server {
     /// being installed. The OSC 777 stream (connector hooks, or the launch
     /// wrapper's `session_end` envelope) then refines and eventually clears
     /// the binding. The caller repaints the fleet surfaces.
-    pub(super) fn bind_agent(&mut self, pane_id: PaneId, agent_id: &str) {
+    pub(super) fn bind_agent(&mut self, reg: &Registry, pane_id: PaneId, agent_id: &str) {
         self.install_agent_binding(pane_id, agent_id);
         let Some(pane) = self.panes.get(&pane_id) else {
             return;
@@ -89,6 +89,10 @@ impl Server {
             pane: pane_id.0,
             status: AgentStatus::Starting,
         });
+        // Standing consent (`delegation-auto-arm`) arms the launched
+        // invocation immediately; the config key is the human's confirmation
+        // for this path.
+        self.maybe_auto_arm_delegation(reg, pane_id);
     }
 
     /// Initialize process facts separately from the caller's binding event.
@@ -315,7 +319,7 @@ impl Server {
                 self.assign_tab_parent(new_id, Some(anchor));
             }
         }
-        self.bind_agent(new_id, &id);
+        self.bind_agent(reg, new_id, &id);
         self.record_agent_delegation(new_id, anchor);
         let task = self.create_task(prompt, uniterm_core::TaskStatus::Doing);
         let context = uniterm_core::tasks::TaskContext {
@@ -397,7 +401,7 @@ impl Server {
                 if !Self::queue_pane_input(reg, p, line.as_bytes()) {
                     return None;
                 }
-                self.bind_agent(active, &id);
+                self.bind_agent(reg, active, &id);
                 self.repaint_chrome_all(reg);
                 Some(active)
             }
@@ -422,7 +426,7 @@ impl Server {
                         self.assign_tab_parent(new_id, Some(anchor));
                     }
                 }
-                self.bind_agent(new_id, &id);
+                self.bind_agent(reg, new_id, &id);
                 self.record_agent_delegation(new_id, anchor);
                 self.finish_targeted_creation(
                     reg,
@@ -2048,6 +2052,10 @@ impl Server {
             // An arm never survives into a new invocation: the process group
             // the human consented for is gone.
             self.disarm_delegation(pane_id, "invocation_changed");
+            // Standing consent (`delegation-auto-arm`) arms the new
+            // invocation immediately; the config key is the human's
+            // confirmation for this path.
+            self.maybe_auto_arm_delegation(reg, pane_id);
             let current = self
                 .panes
                 .get(&pane_id)

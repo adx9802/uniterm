@@ -205,6 +205,41 @@ pub fn bounded_text(value: &str, limit: usize) -> String {
         .collect()
 }
 
+/// Normalize one captured screen region into a stable fingerprint: every
+/// whitespace run (spaces, tabs, newlines) collapses to a single space,
+/// control characters drop out without fusing the words they separated, and
+/// the result is bounded to `limit` characters. Two captures of the same
+/// prompt fingerprint identically, while a different prompt diverges at its
+/// first differing word. This is the identity delegated answering keys on
+/// for screen-detected permission prompts, which carry no structured tool
+/// data of their own: the provider's matched rule text is the same for
+/// every dialog, so only the prompt content can tell two dialogs apart
+/// (docs/06-agentic-supervision.md).
+pub fn fingerprint_text(value: &str, limit: usize) -> String {
+    let mut out = String::new();
+    let mut separated = false;
+    let mut taken = 0usize;
+    for c in value.chars() {
+        if c.is_whitespace() || c.is_control() {
+            // A stripped control must not fuse two words into one, so it
+            // collapses into the same single joiner whitespace gets.
+            separated = !out.is_empty();
+            continue;
+        }
+        if taken >= limit {
+            break;
+        }
+        if separated {
+            out.push(' ');
+            taken += 1;
+            separated = false;
+        }
+        out.push(c);
+        taken += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +345,58 @@ mod tests {
         assert_eq!(
             details.last_notification.unwrap().message.chars().count(),
             DETAIL_TEXT_LIMIT
+        );
+    }
+
+    #[test]
+    fn fingerprint_collapses_whitespace_and_drops_controls() {
+        // Grid rows join into one line: every whitespace run, including the
+        // row separators, becomes a single space.
+        assert_eq!(
+            fingerprint_text(
+                "Do you want to proceed?\n  $ ls   -l\n\n\tEsc to cancel",
+                512
+            ),
+            "Do you want to proceed? $ ls -l Esc to cancel"
+        );
+        // Control characters never reach the audit surface, and stripping
+        // one never fuses two words into one token.
+        assert_eq!(fingerprint_text("a\x1b[31mb\x07c", 64), "a [31mb c");
+        // Leading and trailing whitespace never contribute.
+        assert_eq!(fingerprint_text("   prompt  \n", 64), "prompt");
+        // A blank region has no identity.
+        assert_eq!(fingerprint_text("  \n\t ", 64), "");
+        assert_eq!(fingerprint_text("", 64), "");
+    }
+
+    #[test]
+    fn fingerprint_is_bounded_in_characters() {
+        let long = "word ".repeat(300);
+        let bounded = fingerprint_text(&long, 16);
+        assert_eq!(bounded.chars().count(), 16);
+        assert_eq!(bounded, "word word word w");
+        // A multibyte glyph counts once, never by byte.
+        let stars = "❯ ".repeat(40);
+        assert_eq!(fingerprint_text(&stars, 5).chars().count(), 5);
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_dialogs_and_stables_reasks() {
+        // The same rule text with different command content must produce
+        // different identities (the false loop-guard positive this fixes),
+        // while a re-captured identical dialog keeps its identity.
+        let region_a = "Would you like to run the following command?\n $ rm -rf /tmp/demo\nPress enter to confirm";
+        let region_b = "Would you like to run the following command?\n $ ls -l /var/tmp\nPress enter to confirm";
+        let first = fingerprint_text(region_a, DETAIL_TEXT_LIMIT);
+        assert_ne!(first, fingerprint_text(region_b, DETAIL_TEXT_LIMIT));
+        assert_eq!(first, fingerprint_text(region_a, DETAIL_TEXT_LIMIT));
+        // Incidental spacing differences from a redraw do not drift.
+        assert_eq!(
+            first,
+            fingerprint_text(
+                "Would you like to run the following command?\n  $ rm -rf /tmp/demo\nPress enter to confirm",
+                DETAIL_TEXT_LIMIT
+            )
         );
     }
 }

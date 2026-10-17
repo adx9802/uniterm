@@ -1,9 +1,15 @@
 //! Delegated permission answering, end to end: a human arms one Pane's
-//! invocation, and the supervisor answers allowlisted permission prompts by
-//! typing the provider's own approval reply through the same guarded
-//! terminal-delivery path a human answer uses. Every verdict is appended to
-//! the event log BEFORE any bytes are typed, the deny floor and the budget
-//! withhold, lifecycle changes disarm, and a restart never restores arms.
+//! invocation (or `delegation-auto-arm` arms every fresh binding as standing
+//! consent), and the supervisor answers every permission prompt - structured
+//! (OSC 777) or screen-detected - by typing the provider's own approval
+//! reply through the same guarded terminal-delivery path a human answer
+//! uses. The first answer to a prompt prefers the provider's don't-ask-again
+//! reply; a re-surfaced prompt gets the plain yes-reply once; an identical
+//! re-ask after that yes is the loop the guard withholds. Questions are
+//! never delegated, the hourly budget disarms a spent arm (and auto-arm
+//! never re-arms within that invocation), every verdict is appended to the
+//! event log BEFORE any bytes are typed, lifecycle changes disarm, and a
+//! restart never restores arms.
 //!
 //! The scripted "agent" is the same job-controlled `sh -c` harness the agent
 //! details tests use; its hooks print real connector envelopes from inside
@@ -26,7 +32,7 @@ use common::{isolate_state, unique_workspace_name};
 
 /// `run_server` reads `XDG_CONFIG_HOME` on boot; keep it empty so no real
 /// user config can leak into a test Workspace. Same shape as isolate_state.
-fn isolate_config() {
+fn isolate_config() -> PathBuf {
     static CONFIG: OnceLock<PathBuf> = OnceLock::new();
     let dir = CONFIG.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("uniterm-test-config-{}", std::process::id()));
@@ -34,6 +40,7 @@ fn isolate_config() {
         dir
     });
     std::env::set_var("XDG_CONFIG_HOME", dir);
+    dir.clone()
 }
 
 struct Control {
@@ -115,6 +122,14 @@ impl Control {
             .unwrap_or_default()
     }
 
+    fn arm(&mut self, pane: u64) {
+        let frame = self.request_raw(ControlCommand::DelegationArm {
+            pane: uniterm_core::PaneId(pane),
+            confirmed: true,
+        });
+        assert!(frame["error"].is_null(), "arm failed: {frame}");
+    }
+
     fn type_line(&mut self, pane: u64, text: &str) {
         self.request(ControlCommand::PaneSend {
             pane: uniterm_core::PaneId(pane),
@@ -134,7 +149,7 @@ impl Control {
 
     /// Poll the fleet until `check` holds for the first agent entry.
     fn until(&mut self, what: &str, check: impl Fn(&Value) -> bool) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let agent = self.agent();
             if check(&agent) {
@@ -248,9 +263,9 @@ fn decisions(events: &[Value]) -> Vec<&Value> {
         .collect()
 }
 
-/// A Workspace running the fake agent harness, with one delegation-allow
-/// rule per entry in `allow` and the given hourly budget. `files` holds the
-/// hook envelopes and the script, so later scripts can reference them all.
+/// A Workspace running the fake agent harness with the given hourly answer
+/// budget. `files` holds the hook envelopes and the script, so later scripts
+/// can reference them all.
 struct Harness {
     socket: PathBuf,
     files: PathBuf,
@@ -258,25 +273,23 @@ struct Harness {
     control: Control,
 }
 
-fn harness(files: &Path, allow: &[&str], budget: u16, script: &str) -> Harness {
+fn harness_with_config(
+    files: &Path,
+    script: &str,
+    configure: impl FnOnce(&mut uniterm_core::Config),
+) -> Harness {
     isolate_state();
     isolate_config();
     let workspace = unique_workspace_name();
     let dir = common::socket_root().join(format!("uniterm-delegation-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join(format!("{workspace}.sock"));
-    let rules: Vec<uniterm_core::CommandRule> = allow
-        .iter()
-        .map(|rule| uniterm_core::CommandRule::parse(rule).unwrap())
-        .collect();
     let server_socket = socket.clone();
+    let mut config = uniterm_core::Config::default();
+    configure(&mut config);
     thread::spawn(move || {
         let (mut server, mut poll) = Server::bind(&server_socket, "/bin/sh", &[], 120, 30).unwrap();
-        server.set_config(uniterm_core::Config {
-            delegation_allow: rules,
-            delegation_max_answers_per_hour: budget,
-            ..uniterm_core::Config::default()
-        });
+        server.set_config(config);
         let _ = server.run(&mut poll);
     });
     let mut control = Control::connect(&socket);
@@ -292,6 +305,21 @@ fn harness(files: &Path, allow: &[&str], budget: u16, script: &str) -> Harness {
     }
 }
 
+fn harness(files: &Path, budget: u16, script: &str) -> Harness {
+    harness_with_config(files, script, |config| {
+        config.delegation_max_answers_per_hour = budget;
+    })
+}
+
+/// The auto-arm variant: `delegation-auto-arm` is the human's standing
+/// consent, so every fresh binding arms without a control request.
+fn harness_auto_arm(files: &Path, budget: u16, script: &str) -> Harness {
+    harness_with_config(files, script, |config| {
+        config.delegation_auto_arm = true;
+        config.delegation_max_answers_per_hour = budget;
+    })
+}
+
 fn run_agent(harness: &mut Harness) {
     harness.control.type_line(
         harness.pane,
@@ -299,9 +327,9 @@ fn run_agent(harness: &mut Harness) {
     );
 }
 
-/// Wait until the pane output contains `needle` (or fail after 10 s).
+/// Wait until the pane output contains `needle` (or fail after 15 s).
 fn until_output(control: &mut Control, pane: u64, needle: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while !control.read(pane).contains(needle) {
         assert!(
             Instant::now() < deadline,
@@ -324,6 +352,42 @@ fn assert_output_stays_absent(control: &mut Control, pane: u64, needle: &str) {
     }
 }
 
+/// Poll a script-recorded answers file until it contains `needle`. Screen
+/// dialogs keep the pane display identical across verdicts, so the scripted
+/// agent records what it read to a file instead of echoing it on screen.
+fn until_file_contains(path: &Path, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        if content.contains(needle) {
+            return content;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "answers file never showed {needle:?}: {content}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Assert `needle` stays absent from the answers file for a settle window.
+fn assert_file_stays_absent(path: &Path, needle: &str) {
+    assert_file_stays_absent_for(path, needle, Duration::from_millis(800));
+}
+
+/// Assert `needle` stays absent from the answers file for `window`.
+fn assert_file_stays_absent_for(path: &Path, needle: &str, window: Duration) {
+    let deadline = Instant::now() + window;
+    while Instant::now() < deadline {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            !content.contains(needle),
+            "answers file unexpectedly showed {needle:?}: {content}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn delegated_permission_is_answered_and_audited() {
     let dir = common::temp_dir("delegation-happy");
@@ -331,10 +395,9 @@ fn delegated_permission_is_answered_and_audited() {
     let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
     let mut harness = harness(
         &dir,
-        &["git status"],
         30,
         &format!(
-            "{}; read answer; echo \"GOT:$answer\"; read go",
+            "{}; read answer; echo \"GOT:$answer\"; read fallback; echo \"FELL:$fallback\"; read go",
             cat(&[start, ask])
         ),
     );
@@ -345,19 +408,20 @@ fn delegated_permission_is_answered_and_audited() {
             && agent["details"]["pending_permission"]["preview"] == "git status"
     });
     let id = agent["waiting"].as_u64().unwrap();
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "arm failed: {frame}");
-    let entries = frame["result"]["data"]["entries"].as_array().unwrap();
+    harness.control.arm(harness.pane);
+    let entries = harness.control.delegation_status();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["agent"], "claude");
-    // Claude's approval reply is "1"; the fake agent echoes what it read.
-    until_output(&mut harness.control, harness.pane, "GOT:1");
+    // The first answer prefers Claude's don't-ask-again reply, menu option
+    // 2. The pinned status resurfaces the same prompt identity, and that
+    // re-ask gets the plain yes-reply exactly once (the loop guard refuses
+    // the resurface after that); the fake agent echoes what it read.
+    until_output(&mut harness.control, harness.pane, "GOT:2");
+    until_output(&mut harness.control, harness.pane, "FELL:1");
     let entries = harness.control.delegation_status();
     assert_eq!(entries.len(), 1, "{entries:?}");
-    assert_eq!(entries[0]["answers_used"], 1);
+    assert_eq!(entries[0]["answers_used"], 2);
+    assert_eq!(entries[0]["answers_remaining"], 28);
 
     // The audit trail: armed, then the Allow decision BEFORE the resolution.
     let log = events(&harness.socket);
@@ -381,42 +445,47 @@ fn delegated_permission_is_answered_and_audited() {
 }
 
 #[test]
-fn deny_floor_never_answers() {
-    let dir = common::temp_dir("delegation-deny");
+fn an_armed_pane_answers_every_permission_prompt() {
+    // There is no command gate: the human's arm is the whole consent, so a
+    // prompt about any command is approved and audited like any other.
+    let dir = common::temp_dir("delegation-any");
     let start = hook_file(&dir, "start", session_start("s-1"));
     let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "rm -rf /tmp/demo"));
     let mut harness = harness(
         &dir,
-        &["git status"],
         30,
         &format!(
-            "{}; read answer; echo \"GOT:$answer\"; read go",
+            "{}; read answer; echo \"GOT:$answer\"; read fallback; echo \"FELL:$fallback\"; read go",
             cat(&[start, ask])
         ),
     );
     run_agent(&mut harness);
-    harness.control.until("permission", |agent| {
+    let agent = harness.control.until("permission", |agent| {
         agent["status"] == "Permission"
             && agent["details"]["pending_permission"]["preview"] == "rm -rf /tmp/demo"
     });
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "arm failed: {frame}");
-    // The item is evaluated immediately and withheld; nothing is typed.
-    assert_output_stays_absent(&mut harness.control, harness.pane, "GOT:");
-    assert_eq!(harness.control.waiting().len(), 1);
-    // `explain` reports the same withhold without changing anything.
+    let id = agent["waiting"].as_u64().unwrap();
+    harness.control.arm(harness.pane);
+    // The arm's immediate pass answers the prompt that is already on screen
+    // (always-reply first, then the one yes the pinned re-ask is owed).
+    until_output(&mut harness.control, harness.pane, "GOT:2");
+    until_output(&mut harness.control, harness.pane, "FELL:1");
+    let entries = harness.control.delegation_status();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["answers_used"], 2);
+    // `explain` reaches the same Allow for a fresh evaluation.
     let explained = harness.control.request(ControlCommand::DelegationExplain {
         pane: uniterm_core::PaneId(harness.pane),
     });
     assert_eq!(explained["found"], true);
-    assert_eq!(explained["verdict"]["outcome"], "withhold");
     let log = events(&harness.socket);
     let records = decisions(&log);
-    assert_eq!(records.len(), 1, "{records:?}");
-    assert_eq!(records[0]["record"]["verdict"]["outcome"], "withhold");
+    let decision = records
+        .iter()
+        .find(|record| record["record"]["waiting_id"].as_u64() == Some(id))
+        .unwrap_or_else(|| panic!("no decision for the armed prompt: {records:?}"));
+    assert_eq!(decision["record"]["verdict"]["outcome"], "allow");
+    assert_eq!(decision["record"]["preview"], "rm -rf /tmp/demo");
     harness.control.type_line(harness.pane, "go");
 }
 
@@ -427,7 +496,6 @@ fn question_is_never_delegated() {
     let ask = hook_file(&dir, "ask", question("s-1"));
     let mut harness = harness(
         &dir,
-        &["git status"],
         30,
         &format!(
             "{}; read answer; echo \"GOT:$answer\"; read go",
@@ -438,11 +506,7 @@ fn question_is_never_delegated() {
     harness
         .control
         .until("question", |agent| agent["status"] == "Question");
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "arm failed: {frame}");
+    harness.control.arm(harness.pane);
     // Direction questions stay with the human by construction: the arm's
     // immediate pass reaches only a withhold verdict, the item stays, and
     // nothing is ever typed.
@@ -462,33 +526,36 @@ fn question_is_never_delegated() {
 
 #[test]
 fn identical_reask_loop_withholds() {
+    // The loop guard reconciled with the always-to-yes escalation: the first
+    // answer to a prompt is the always-reply, the identical re-ask gets the
+    // plain yes-reply once (the guard must not swallow it), and only the
+    // re-ask after THAT yes is the runaway loop the guard withholds.
     let dir = common::temp_dir("delegation-loop");
     let start = hook_file(&dir, "start", session_start("s-1"));
     let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
     let mut harness = harness(
         &dir,
-        &["git status"],
         30,
         &format!(
-            "{}; read first; echo \"GOT:$first\"; read second; echo \"AGAIN:$second\"; read go",
+            "{}; read first; echo \"GOT:$first\"; read second; echo \"AGAIN:$second\"; read third; echo \"THIRD:$third\"; read go",
             cat(&[start, ask])
         ),
     );
     run_agent(&mut harness);
     harness
         .control
-        .until("working", |agent| !agent["status"].is_null());
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "arm failed: {frame}");
-    // The first prompt is answered through the Created hook path.
-    until_output(&mut harness.control, harness.pane, "GOT:1");
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    harness.control.arm(harness.pane);
+    // The first prompt is answered with Claude's always-reply.
+    until_output(&mut harness.control, harness.pane, "GOT:2");
     // The smoothed status stays pinned at Permission, so the reconcile
-    // creates a fresh item for the re-ask; the loop guard withholds it
-    // rather than typing the same approval twice in a row.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // creates a fresh item for the re-ask; the always keystroke did not
+    // stick for this variant, so the plain yes-reply answers it once.
+    until_output(&mut harness.control, harness.pane, "AGAIN:1");
+    // The identical prompt resurfacing a third time inside the window is
+    // the runaway loop: the guard withholds and the item stays with the
+    // human.
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let waiting = harness.control.waiting();
         if waiting.len() == 1 {
@@ -497,14 +564,15 @@ fn identical_reask_loop_withholds() {
         assert!(Instant::now() < deadline, "re-ask never surfaced");
         thread::sleep(Duration::from_millis(20));
     }
-    assert_output_stays_absent(&mut harness.control, harness.pane, "AGAIN:");
+    assert_output_stays_absent(&mut harness.control, harness.pane, "THIRD:");
     let log = events(&harness.socket);
     let records = decisions(&log);
-    assert_eq!(records.len(), 2, "{records:?}");
+    assert_eq!(records.len(), 3, "{records:?}");
     assert_eq!(records[0]["record"]["verdict"]["outcome"], "allow");
-    assert_eq!(records[1]["record"]["verdict"]["outcome"], "withhold");
+    assert_eq!(records[1]["record"]["verdict"]["outcome"], "allow");
+    assert_eq!(records[2]["record"]["verdict"]["outcome"], "withhold");
     assert!(
-        records[1]["record"]["verdict"]["reason"]
+        records[2]["record"]["verdict"]["reason"]
             .as_str()
             .unwrap()
             .contains("loop"),
@@ -515,6 +583,9 @@ fn identical_reask_loop_withholds() {
 
 #[test]
 fn budget_exhaustion_disarms_until_rearmed() {
+    // The hourly budget is a core safety rail: with a budget of one, the
+    // first answer spends it, the arm disarms itself on the next verdict,
+    // and every later prompt waits for the human until a re-arm.
     let dir = common::temp_dir("delegation-budget");
     let start = hook_file(&dir, "start", session_start("s-1"));
     let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
@@ -522,7 +593,6 @@ fn budget_exhaustion_disarms_until_rearmed() {
     let idle = plain_file(&dir, "idle", "idle");
     let mut harness = harness(
         &dir,
-        &["git status", "git diff"],
         1,
         &format!(
             "{}; read first; echo \"GOT1:$first\"; {}; {}; read second; echo \"GOT2:$second\"; read go",
@@ -535,13 +605,10 @@ fn budget_exhaustion_disarms_until_rearmed() {
     harness
         .control
         .until("bound", |agent| agent["details"]["session_id"] == "s-1");
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "arm failed: {frame}");
-    until_output(&mut harness.control, harness.pane, "GOT1:1");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    harness.control.arm(harness.pane);
+    // The one budget unit buys the first answer, Claude's always-reply.
+    until_output(&mut harness.control, harness.pane, "GOT1:2");
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let log = events(&harness.socket);
         if log
@@ -559,16 +626,437 @@ fn budget_exhaustion_disarms_until_rearmed() {
     assert_eq!(harness.control.waiting().len(), 1);
 
     // Re-arming is fresh consent: the budget resets and the active prompt is
-    // answered by the arm's immediate pass.
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "re-arm failed: {frame}");
-    until_output(&mut harness.control, harness.pane, "GOT2:1");
+    // answered by the arm's immediate pass - and with a budget of one, the
+    // spent arm disarms itself again on the pinned re-ask.
+    harness.control.arm(harness.pane);
+    until_output(&mut harness.control, harness.pane, "GOT2:2");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let log = events(&harness.socket);
+        if log
+            .iter()
+            .filter(|event| event["DelegationDisarmed"]["reason"] == "budget_exhausted")
+            .count()
+            == 2
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "second arm never spent: {log:?}");
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(harness.control.delegation_status().is_empty());
+    let log = events(&harness.socket);
+    assert_eq!(
+        log.iter()
+            .filter(|event| event.get("DelegationArmed").is_some())
+            .count(),
+        2,
+        "each arm is its own consent and its own budget: {log:?}"
+    );
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn auto_arm_never_rearms_a_budget_exhausted_invocation() {
+    // Auto-arm is per invocation: a budget_exhausted disarm hands the
+    // prompts back to the human for the rest of that invocation, and only a
+    // genuinely new binding arms itself again.
+    let dir = common::temp_dir("delegation-auto-arm-budget");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let restart = hook_file(&dir, "restart", session_start("s-2"));
+    let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
+    let mut harness = harness_auto_arm(
+        &dir,
+        1,
+        &format!(
+            "{}; read answer; echo \"GOT:$answer\"; read go",
+            cat(&[start, ask])
+        ),
+    );
+    run_agent(&mut harness);
+    // The fresh binding auto-armed and its one budget unit bought the
+    // always-reply; the pinned re-ask then spends the arm.
+    until_output(&mut harness.control, harness.pane, "GOT:2");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let log = events(&harness.socket);
+        if log
+            .iter()
+            .any(|event| event["DelegationDisarmed"]["reason"] == "budget_exhausted")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never disarmed: {log:?}");
+        thread::sleep(Duration::from_millis(50));
+    }
+    // The invocation is still alive and unarmed, and stays that way: only a
+    // human re-arm or a new invocation restores answering.
+    let settle = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < settle {
+        assert!(
+            harness.control.delegation_status().is_empty(),
+            "auto-arm re-created an arm inside the budget-exhausted invocation"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // A fresh invocation in the same Pane auto-arms again with no request.
+    std::fs::write(
+        harness.files.join("second.sh"),
+        format!("{}; read go", cat(&[restart])),
+    )
+    .unwrap();
+    harness.control.type_line(harness.pane, "go");
+    thread::sleep(Duration::from_millis(200));
+    harness.control.type_line(
+        harness.pane,
+        &format!("sh '{}'", harness.files.join("second.sh").display()),
+    );
+    harness
+        .control
+        .until("rebound", |agent| agent["details"]["session_id"] == "s-2");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while harness.control.delegation_status().is_empty() {
+        assert!(Instant::now() < deadline, "second binding never auto-armed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let log = events(&harness.socket);
+    assert_eq!(
+        log.iter()
+            .filter(|event| event.get("DelegationArmed").is_some())
+            .count(),
+        2,
+        "each invocation armed exactly once: {log:?}"
+    );
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn auto_arm_answers_a_permission_without_a_manual_arm() {
+    // `delegation-auto-arm` is standing consent: the fresh binding arms
+    // itself and the permission prompt is answered with no control request
+    // at all.
+    let dir = common::temp_dir("delegation-auto-arm");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
+    let mut harness = harness_auto_arm(
+        &dir,
+        30,
+        &format!(
+            "{}; read answer; echo \"GOT:$answer\"; read fallback; echo \"FELL:$fallback\"; read go",
+            cat(&[start, ask])
+        ),
+    );
+    run_agent(&mut harness);
+    // Always-reply for the first sighting, one yes for the pinned re-ask.
+    until_output(&mut harness.control, harness.pane, "GOT:2");
+    until_output(&mut harness.control, harness.pane, "FELL:1");
     let entries = harness.control.delegation_status();
     assert_eq!(entries.len(), 1, "{entries:?}");
-    assert_eq!(entries[0]["answers_used"], 1);
+    assert_eq!(entries[0]["agent"], "claude");
+    assert_eq!(entries[0]["answers_used"], 2);
+    // The audit trail reads as consent, decision, side effect: armed first,
+    // then the Allow decision BEFORE the Answered resolution.
+    let log = events(&harness.socket);
+    let armed = position(&log, 0, |event| {
+        event["DelegationArmed"]["pane"] == harness.pane
+    });
+    let decided = position(&log, armed, |event| {
+        event["DelegationDecision"]["record"]["verdict"]["outcome"] == "allow"
+    });
+    let resolved = position(&log, decided, |event| {
+        event["WaitingResolved"]["resolution"] == "Answered"
+    });
+    assert!(armed < decided && decided < resolved, "{log:?}");
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn auto_arm_rearms_a_new_invocation_after_the_previous_exits() {
+    // Auto-arm is per invocation: the arm dies with the process group it was
+    // scoped to, and the next fresh binding arms itself in turn.
+    let dir = common::temp_dir("delegation-auto-arm-lifecycle");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let restart = hook_file(&dir, "restart", session_start("s-2"));
+    let mut harness = harness_auto_arm(&dir, 30, &format!("{}; read go", cat(&[start])));
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while harness.control.delegation_status().is_empty() {
+        assert!(Instant::now() < deadline, "first binding never auto-armed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    harness.control.type_line(harness.pane, "go");
+    // The invocation ends; the arm must not survive into whatever comes next.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if harness.control.delegation_status().is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "arm survived the invocation end");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // A fresh invocation in the same Pane auto-arms again with no request.
+    std::fs::write(
+        harness.files.join("second.sh"),
+        format!("{}; read go", cat(&[restart])),
+    )
+    .unwrap();
+    thread::sleep(Duration::from_millis(200));
+    harness.control.type_line(
+        harness.pane,
+        &format!("sh '{}'", harness.files.join("second.sh").display()),
+    );
+    harness
+        .control
+        .until("rebound", |agent| agent["details"]["session_id"] == "s-2");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while harness.control.delegation_status().is_empty() {
+        assert!(Instant::now() < deadline, "second binding never auto-armed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let log = events(&harness.socket);
+    assert_eq!(
+        log.iter()
+            .filter(|event| event.get("DelegationArmed").is_some())
+            .count(),
+        2,
+        "each invocation armed exactly once: {log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|event| event.get("DelegationDisarmed").is_some()),
+        "the first arm ended with its invocation: {log:?}"
+    );
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn screen_detected_permission_is_answered_with_a_prompt_fingerprint() {
+    // A permission prompt detected by the provider's screen rules carries no
+    // structured payload. It is answered like any other: the audit record's
+    // tool is "unknown" and its preview is a bounded fingerprint of the live
+    // prompt region - the actual dialog content, not the waiting item's
+    // rule-text summary, which is identical for every dialog one provider
+    // raises. The scripted agent keeps the screen byte-identical across
+    // verdicts (echo off, answers recorded to a file), so the pinned
+    // resurface sees exactly the prompt it answered.
+    let dir = common::temp_dir("delegation-screen");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {}; printf '\\033[2J\\033[HDo you want to proceed?\\n  $ rm -rf /tmp/demo\\n❯ 1. Yes\\n  2. No\\nEsc to cancel · Tab to amend\\n'; read first; echo \"FIRST:$first\" >> '{}'; read second; echo \"SECOND:$second\" >> '{}'; read go",
+            cat(&[start]),
+            answers.display(),
+            answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    // The screen rule matches after the permission dwell (about 5 s).
+    let agent = harness
+        .control
+        .until("screen permission", |agent| agent["status"] == "Permission");
+    assert!(
+        agent["details"]["pending_permission"].is_null(),
+        "a screen-detected prompt has no structured payload: {agent}"
+    );
+    let waiting = harness.control.waiting();
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert_eq!(waiting[0]["kind"], "Permission");
+    let summary = waiting[0]["summary"].as_str().unwrap().to_string();
+    harness.control.arm(harness.pane);
+    // The screen-pinned status resurfaces the prompt like any other pin:
+    // always-reply, one yes, then the loop guard's withhold.
+    until_file_contains(&answers, "FIRST:2");
+    until_file_contains(&answers, "SECOND:1");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let log = loop {
+        let log = events(&harness.socket);
+        if decisions(&log).len() >= 3 {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "decisions never recorded");
+        thread::sleep(Duration::from_millis(50));
+    };
+    let records = decisions(&log);
+    assert_eq!(records.len(), 3, "{records:?}");
+    for record in &records {
+        assert_eq!(record["record"]["tool"], "unknown");
+        let preview = record["record"]["preview"].as_str().unwrap();
+        // Distinguishing content, never the bare rule-text summary.
+        assert_ne!(preview, summary, "{records:?}");
+        assert!(preview.contains("Do you want to proceed?"), "{preview}");
+        assert!(preview.contains("rm -rf /tmp/demo"), "{preview}");
+        assert!(preview.contains("Esc to cancel"), "{preview}");
+    }
+    assert_eq!(records[0]["record"]["verdict"]["outcome"], "allow");
+    assert_eq!(records[1]["record"]["verdict"]["outcome"], "allow");
+    assert_eq!(records[2]["record"]["verdict"]["outcome"], "withhold");
+    assert!(
+        records[2]["record"]["verdict"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("loop"),
+        "{records:?}"
+    );
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn distinct_screen_dialogs_inside_the_loop_window_are_both_answered() {
+    // Regression: two DIFFERENT screen-detected dialogs inside the 60 s loop
+    // window share the provider's matched rule text, so a summary-keyed
+    // identity withheld the second as a re-ask and a hook-less agent got one
+    // auto-answer per minute. The prompt-region fingerprint tells them
+    // apart, so both are answered. The screen goes blank between the
+    // dialogs (long enough to idle the smoothed status), which is what
+    // surfaces the second dialog as a fresh waiting item.
+    let dir = common::temp_dir("delegation-screen-distinct");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; printf '\\033[2J\\033[HDo you want to proceed?\\n  $ rm -rf /tmp/demo\\n❯ 1. Yes\\n  2. No\\nEsc to cancel · Tab to amend\\n'; read a1; echo \"A1:$a1\" >> '{out}'; read a2; echo \"A2:$a2\" >> '{out}'; printf '\\033[2J\\033[H'; sleep 2; printf 'Do you want to proceed?\\n  $ ls -l /var/tmp\\n❯ 1. Yes\\n  2. No\\nEsc to cancel · Tab to amend\\n'; read b1; echo \"B1:$b1\" >> '{out}'; read b2; echo \"B2:$b2\" >> '{out}'; read go",
+            start = cat(&[start]),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    harness.control.arm(harness.pane);
+    // Dialog A: always-reply, then the pinned resurface's one yes.
+    until_file_contains(&answers, "A1:2");
+    until_file_contains(&answers, "A2:1");
+    // Dialog B inside the same loop window: answered on its own identity,
+    // always-reply first, never withheld as a re-ask of A.
+    until_file_contains(&answers, "B1:2");
+    let content = until_file_contains(&answers, "B2:1");
+    assert!(
+        content.lines().collect::<Vec<_>>() == ["A1:2", "A2:1", "B1:2", "B2:1"],
+        "{content}"
+    );
+    // The audit trail keys on dialog content: an allow whose preview names
+    // A's command, then an allow whose preview names B's, both distinct
+    // from the rule-text summary the waiting item carries.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let log = loop {
+        let log = events(&harness.socket);
+        let allow_count = decisions(&log)
+            .iter()
+            .filter(|record| record["record"]["verdict"]["outcome"] == "allow")
+            .count();
+        if allow_count >= 4 {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "allows never recorded");
+        thread::sleep(Duration::from_millis(50));
+    };
+    let records = decisions(&log);
+    let allows: Vec<_> = records
+        .iter()
+        .filter(|record| record["record"]["verdict"]["outcome"] == "allow")
+        .collect();
+    assert!(
+        allows[..2].iter().all(|record| record["record"]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("rm -rf /tmp/demo")),
+        "dialog A's allows carry its command: {allows:?}"
+    );
+    assert!(
+        allows[2..].iter().all(|record| record["record"]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("ls -l /var/tmp")),
+        "dialog B's allows carry its command: {allows:?}"
+    );
+    assert!(
+        allows.iter().all(|record| record["record"]["preview"]
+            .as_str()
+            .is_some_and(|preview| !preview.contains("grid matched"))),
+        "an allow fell back to the rule-text summary for identity: {records:?}"
+    );
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn identical_screen_dialog_reask_still_withholds() {
+    // The other half of the loop-guard contract: a genuinely re-asked
+    // IDENTICAL screen dialog keeps one fingerprint, so after the
+    // always-reply and the one plain yes the guard still treats the
+    // surfacing after that yes as a runaway loop and withholds it.
+    let dir = common::temp_dir("delegation-screen-reask");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; printf '\\033[2J\\033[HDo you want to proceed?\\n  $ git push --force\\n❯ 1. Yes\\n  2. No\\nEsc to cancel · Tab to amend\\n'; read a1; echo \"A1:$a1\" >> '{out}'; read a2; echo \"A2:$a2\" >> '{out}'; printf '\\033[2J\\033[H'; sleep 2; printf 'Do you want to proceed?\\n  $ git push --force\\n❯ 1. Yes\\n  2. No\\nEsc to cancel · Tab to amend\\n'; read a3; echo \"A3:$a3\" >> '{out}'",
+            start = cat(&[start]),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    harness.control.arm(harness.pane);
+    // The first showing gets the always-reply, its pinned resurface one yes.
+    until_file_contains(&answers, "A1:2");
+    until_file_contains(&answers, "A2:1");
+    // The byte-identical re-ask surfaces as a fresh waiting item after the
+    // blank interval, and the guard withholds it: no third answer is typed.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let log = loop {
+        let log = events(&harness.socket);
+        let records = decisions(&log);
+        if records.len() >= 4
+            && records
+                .last()
+                .is_some_and(|record| record["record"]["verdict"]["outcome"] == "withhold")
+        {
+            break log;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the identical re-ask was never withheld: {records:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_file_stays_absent(&answers, "A3:");
+    let records = decisions(&log);
+    assert_eq!(records[0]["record"]["verdict"]["outcome"], "allow");
+    assert_eq!(records[1]["record"]["verdict"]["outcome"], "allow");
+    let last = records.last().unwrap();
+    assert_eq!(last["record"]["verdict"]["outcome"], "withhold");
+    assert!(
+        last["record"]["verdict"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("loop"),
+        "{records:?}"
+    );
+    assert!(
+        last["record"]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("git push --force"),
+        "the withheld re-ask keys on the dialog content: {records:?}"
+    );
     harness.control.type_line(harness.pane, "go");
 }
 
@@ -579,7 +1067,6 @@ fn delegation_disarms_on_invocation_change_and_pane_close() {
     let restart = hook_file(&dir, "restart", session_start("s-2"));
     let mut harness = harness(
         &dir,
-        &["git status"],
         30,
         // The script ends after one line; the foreground returns to the
         // shell, ending the invocation the arm was scoped to.
@@ -589,15 +1076,11 @@ fn delegation_disarms_on_invocation_change_and_pane_close() {
     harness
         .control
         .until("bound", |agent| agent["details"]["session_id"] == "s-1");
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "arm failed: {frame}");
+    harness.control.arm(harness.pane);
     assert_eq!(harness.control.delegation_status().len(), 1);
     harness.control.type_line(harness.pane, "go");
     // The invocation ends; the arm must not survive into whatever comes next.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if harness.control.delegation_status().is_empty() {
             break;
@@ -620,11 +1103,7 @@ fn delegation_disarms_on_invocation_change_and_pane_close() {
     harness
         .control
         .until("rebound", |agent| agent["details"]["session_id"] == "s-2");
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "re-arm failed: {frame}");
+    harness.control.arm(harness.pane);
     assert_eq!(harness.control.delegation_status().len(), 1);
     // Keep a second Pane alive: closing the Workspace's last Pane stops the
     // server, and with it the control connection.
@@ -654,12 +1133,7 @@ fn delegation_disarms_on_invocation_change_and_pane_close() {
 fn arm_requires_confirmation_over_control() {
     let dir = common::temp_dir("delegation-confirm");
     let start = hook_file(&dir, "start", session_start("s-1"));
-    let mut harness = harness(
-        &dir,
-        &["git status"],
-        30,
-        &format!("{}; read go", cat(&[start])),
-    );
+    let mut harness = harness(&dir, 30, &format!("{}; read go", cat(&[start])));
     run_agent(&mut harness);
     harness
         .control
@@ -679,11 +1153,7 @@ fn arm_requires_confirmation_over_control() {
     });
     assert_eq!(frame["error"]["code"], "not_found", "{frame}");
     // Confirmed with a bound agent arms.
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "arm failed: {frame}");
+    harness.control.arm(harness.pane);
     assert_eq!(harness.control.delegation_status().len(), 1);
     let log = events(&harness.socket);
     assert_eq!(
@@ -703,7 +1173,6 @@ fn an_unarmed_pane_is_byte_identical() {
     let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
     let mut harness = harness(
         &dir,
-        &["git status"],
         30,
         &format!(
             "{}; read answer; echo \"GOT:$answer\"; read go",
@@ -741,10 +1210,9 @@ fn a_restart_never_restores_arms_or_answers() {
     let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
     let mut harness = harness(
         &dir,
-        &["git status"],
         30,
         &format!(
-            "{}; read answer; echo \"GOT:$answer\"; read go",
+            "{}; read answer; echo \"GOT:$answer\"; read fallback; echo \"FELL:$fallback\"; read go",
             cat(&[start, ask])
         ),
     );
@@ -753,12 +1221,9 @@ fn a_restart_never_restores_arms_or_answers() {
         agent["status"] == "Permission"
             && agent["details"]["pending_permission"]["preview"] == "git status"
     });
-    let frame = harness.control.request_raw(ControlCommand::DelegationArm {
-        pane: uniterm_core::PaneId(harness.pane),
-        confirmed: true,
-    });
-    assert!(frame["error"].is_null(), "arm failed: {frame}");
-    until_output(&mut harness.control, harness.pane, "GOT:1");
+    harness.control.arm(harness.pane);
+    until_output(&mut harness.control, harness.pane, "GOT:2");
+    until_output(&mut harness.control, harness.pane, "FELL:1");
     assert_eq!(harness.control.delegation_status().len(), 1);
 
     // Clean stop: the event stream outlives the server; the snapshot does not.
@@ -768,7 +1233,7 @@ fn a_restart_never_restores_arms_or_answers() {
             &uniterm_proto::ClientMessage::KillServer,
         ))
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while harness.socket.exists() {
         assert!(Instant::now() < deadline, "server never stopped");
         thread::sleep(Duration::from_millis(20));

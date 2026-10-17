@@ -34,9 +34,8 @@ pub use config::{
     StatusPosition, Theme, ThemePreset,
 };
 pub use delegate::{
-    evaluate_delegation, CommandRule, DelegateVerdict, DelegationFacts, DelegationPolicy,
-    DelegationRecord, DELEGATION_DEFAULT_ANSWERS_PER_HOUR, DELEGATION_MAX_ANSWERS_PER_HOUR,
-    DELEGATION_MAX_RULES,
+    evaluate_delegation, DelegateVerdict, DelegationPolicy, DelegationRecord,
+    DELEGATION_DEFAULT_ANSWERS_PER_HOUR, DELEGATION_MAX_ANSWERS_PER_HOUR,
 };
 pub use grid::{Attrs, Cell, Color, Grid, GridCapture, StoredCell, StoredLine, UnderlineStyle};
 pub use guardrail::{
