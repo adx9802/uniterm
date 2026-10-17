@@ -232,6 +232,12 @@ struct Pane {
     dev_discovery_dirty: bool,
     detection_candidate: Option<DetectionCandidate>,
     last_detection: Option<DetectionRecord>,
+    /// One-shot delegation fast settle: the armed Pane's screen showed the
+    /// provider's complete permission dialog after its last region change.
+    /// The instant is the fire deadline and the hash identifies the region
+    /// it was armed against, so any region write re-arms or clears the tick
+    /// and nothing runs while the pane is idle (`server::delegate`).
+    delegation_settle: Option<(std::time::Instant, u64)>,
     metadata: HashMap<String, MetadataValue>,
     input: Vec<u8>,
     input_offset: usize,
@@ -1070,6 +1076,7 @@ impl Server {
                 }
             }
             self.flush_detection_due(poll.registry());
+            self.flush_delegation_settles(poll.registry());
             self.flush_delegation(poll.registry());
             self.flush_prompt_deliveries_due(poll.registry());
             self.flush_artifact_validations_due();
@@ -1157,6 +1164,7 @@ impl Server {
                     .as_ref()
                     .map(|candidate| candidate.since + candidate.dwell)
                     .into_iter()
+                    .chain(pane.delegation_settle.map(|(deadline, _)| deadline))
                     .chain(pane.metadata.values().filter_map(|value| value.expires))
             })
             .chain(self.notification.as_ref().map(|toast| toast.expires))
@@ -1402,6 +1410,7 @@ impl Server {
                 dev_discovery_dirty: false,
                 detection_candidate: None,
                 last_detection: None,
+                delegation_settle: None,
                 metadata: HashMap::new(),
                 input: Vec::new(),
                 input_offset: 0,

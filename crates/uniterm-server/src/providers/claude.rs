@@ -125,3 +125,18 @@ pub(super) const APPROVAL_REPLY: &str = "1";
 /// by the usual Enter. A prompt variant that does not accept it re-surfaces
 /// and gets the plain yes-reply from then on.
 pub(super) const ALWAYS_REPLY: &str = "2";
+
+/// Claude Code's complete permission dialog: its question line, the numbered
+/// menu (option 1 is always "Yes"), and the cancel footer all visible at
+/// once. A screen showing only part of that triple is still rendering and
+/// must never be answered early.
+pub(super) const DIALOG_SIGNATURE: super::DialogSignature = super::DialogSignature {
+    question: &[
+        "do you want to proceed?",
+        "allow this tool",
+        "do you want to allow this connection?",
+        "waiting for permission",
+    ],
+    options: &["1. yes"],
+    footer: &["esc to cancel"],
+};

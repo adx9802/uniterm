@@ -238,6 +238,21 @@ pub(super) fn global_files() -> Vec<(String, std::path::PathBuf)> {
 /// on the agent id.
 pub(super) const APPROVAL_REPLY: &str = "";
 
+/// Codex's complete permission dialog: the question line, the numbered
+/// options, and the "press enter to confirm" footer all visible at once. A
+/// screen showing only part of that triple is still rendering and must never
+/// be answered early.
+pub(super) const DIALOG_SIGNATURE: super::DialogSignature = super::DialogSignature {
+    question: &[
+        "would you like to run the following command?",
+        "allow codex to",
+        "allow command?",
+        "trust this folder?",
+    ],
+    options: &["1. yes", "2. no"],
+    footer: &["press enter to confirm"],
+};
+
 pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
     prefix: &[],
     prompt_flag: None,
