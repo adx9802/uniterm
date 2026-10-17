@@ -1157,6 +1157,178 @@ fn yolo_mode_first_attach_reports_the_boot_config_and_open_writes_nothing() {
 }
 
 #[test]
+fn fast_settle_answers_a_complete_settled_dialog_before_the_dwell() {
+    // An armed Pane whose screen shows the COMPLETE provider dialog,
+    // settled quiet, is answered on the fast settle (~0.1 s) instead of the
+    // generic 5 s permission dwell. The smoothed status is untouched, the
+    // verdict rides the same fingerprint-keyed rails, and the pinned
+    // resurface still gets its one yes from the dwell path.
+    let dir = common::temp_dir("delegation-settle");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; printf '\\033[2J\\033[HDo you want to proceed?\\n  $ rm -rf /tmp/demo\\n❯ 1. Yes\\n  2. No\\nEsc to cancel · Tab to amend\\n'; read first; echo \"FIRST:$first\" >> '{out}'; read second; echo \"SECOND:$second\" >> '{out}'; read go",
+            start = cat(&[start]),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    let armed_at = Instant::now();
+    harness.control.arm(harness.pane);
+    // The always-reply lands well before the 5 s permission dwell would
+    // have created the waiting item.
+    until_file_contains(&answers, "FIRST:2");
+    assert!(
+        armed_at.elapsed() < Duration::from_secs(3),
+        "the fast settle was not faster than the dwell: {:?}",
+        armed_at.elapsed()
+    );
+    // The pinned resurface still gets exactly one plain yes, now from the
+    // dwell path, and the identical re-ask after that is the loop withhold.
+    until_file_contains(&answers, "SECOND:1");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let log = loop {
+        let log = events(&harness.socket);
+        if decisions(&log).len() >= 3 {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "decisions never recorded");
+        thread::sleep(Duration::from_millis(50));
+    };
+    let records = decisions(&log);
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert_eq!(records[0]["record"]["verdict"]["outcome"], "allow");
+    assert_eq!(records[1]["record"]["verdict"]["outcome"], "allow");
+    assert_eq!(records[2]["record"]["verdict"]["outcome"], "withhold");
+    assert!(records.iter().all(|record| record["record"]["preview"]
+        .as_str()
+        .unwrap()
+        .contains("rm -rf /tmp/demo")));
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn fast_settle_never_answers_a_partial_dialog() {
+    // A dialog missing its footer is still rendering: the fast settle never
+    // completes its signature, so nothing is typed early. The generic
+    // permission dwell is untouched and answers the armed Pane on the
+    // normal 5 s path.
+    let dir = common::temp_dir("delegation-partial");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; printf '\\033[2J\\033[HDo you want to proceed?\\n  $ rm -rf /tmp/demo\\n❯ 1. Yes\\n  2. No\\n'; read first; echo \"FIRST:$first\" >> '{out}'; read second; echo \"SECOND:$second\" >> '{out}'; read go",
+            start = cat(&[start]),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    harness.control.arm(harness.pane);
+    // Well past the 0.1 s settle but before the 5 s dwell: nothing typed.
+    assert_file_stays_absent_for(&answers, "FIRST:", Duration::from_secs(3));
+    assert!(
+        decisions(&events(&harness.socket)).is_empty(),
+        "a partial dialog was answered early"
+    );
+    // The dwell path is intact: the armed Pane is answered on the normal
+    // path (always-reply, then the pinned resurface's one yes).
+    until_file_contains(&answers, "FIRST:2");
+    until_file_contains(&answers, "SECOND:1");
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn fast_settle_waits_for_the_region_to_stay_quiet() {
+    // A dialog that keeps redrawing never gets its quiet window: every
+    // region write re-arms the one-shot settle tick, so the answer lands
+    // only after the last repaint, never mid-animation. The repaints land
+    // closer together than the 0.1 s observation interval, so the region
+    // is never byte-stable long enough for the tick to fire.
+    let dir = common::temp_dir("delegation-flicker");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; read release; i=0; while [ $i -lt 40 ]; do printf '\\033[2J\\033[HDo you want to proceed?\\n  $ rm -rf /tmp/demo (tick %s)\\n❯ 1. Yes\\n  2. No\\nEsc to cancel · Tab to amend\\n' \"$i\"; i=$((i+1)); sleep 0.04; done; read first; echo \"FIRST:$first\" >> '{out}'; read second; echo \"SECOND:$second\" >> '{out}'; read go",
+            start = cat(&[start]),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    harness.control.arm(harness.pane);
+    // Release the flicker (~1.6 s of repaints): no answer can land while the
+    // region keeps moving.
+    harness.control.type_line(harness.pane, "release");
+    assert_file_stays_absent_for(&answers, "FIRST:", Duration::from_millis(1000));
+    // Once the region stays quiet, the settle fires and the always-reply
+    // lands; the dwell path then owns the pinned resurface as usual.
+    until_file_contains(&answers, "FIRST:2");
+    until_file_contains(&answers, "SECOND:1");
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn an_unarmed_pane_keeps_the_dwell_path_for_a_complete_dialog() {
+    // The fast settle is delegation-only: an unarmed Pane showing the very
+    // same complete, quiet dialog is never answered and never has its
+    // status shortcut - the 5 s permission dwell still creates the item.
+    let dir = common::temp_dir("delegation-unarmed-settle");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; printf '\\033[2J\\033[HDo you want to proceed?\\n  $ rm -rf /tmp/demo\\n❯ 1. Yes\\n  2. No\\nEsc to cancel · Tab to amend\\n'; read first; echo \"FIRST:$first\" >> '{out}'; read go",
+            start = cat(&[start]),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    // Well past the settle window but before the dwell: no Permission
+    // status, no waiting item, nothing typed.
+    let early = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < early {
+        let agent = harness.control.agent();
+        assert_ne!(agent["status"], "Permission", "status was shortcut");
+        assert!(
+            harness.control.waiting().is_empty(),
+            "an unarmed Pane got a waiting item early"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    // The dwell path is intact: the smoothed status flips, the item
+    // surfaces for the human, and nothing is ever typed.
+    harness
+        .control
+        .until("permission", |agent| agent["status"] == "Permission");
+    assert_eq!(harness.control.waiting().len(), 1);
+    assert_file_stays_absent(&answers, "FIRST:");
+    assert!(decisions(&events(&harness.socket)).is_empty());
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
 fn screen_detected_permission_is_answered_with_a_prompt_fingerprint() {
     // A permission prompt detected by the provider's screen rules carries no
     // structured payload. It is answered like any other: the audit record's
@@ -1616,4 +1788,177 @@ fn a_restart_never_restores_arms_or_answers() {
         ))
         .unwrap();
     let _ = server.join();
+}
+
+/// Write the envelope the codex connector would print for one hook
+/// invocation, so a scripted agent binds as codex without the real binary.
+fn codex_hook_file(dir: &Path, name: &str, hook: Value) -> PathBuf {
+    let envelope = uniterm_server::connectors::hook_envelope("codex", hook.to_string().as_bytes())
+        .unwrap_or_else(|| panic!("codex connector rejected {hook}"));
+    let path = dir.join(name);
+    std::fs::write(&path, envelope).unwrap();
+    path
+}
+
+/// The codex 0.163 approval dialog exactly as a live grid rendered it:
+/// the environment and reason lines plus the wrapped command and options
+/// push the anchored question line well outside the twelve-row status
+/// evidence tail, which is why the fast settle reads a taller dialog
+/// region than the screen rules.
+const CODEX_LIVE_DIALOG: &str = "  Would you like to run the following command?\n\
+\n\
+  Environment: local\n\
+\n\
+  Reason: Allow creating ~/demo.txt outside\n\
+  the sandbox with touch?\n\
+\n\
+  $ touch ~/demo.txt\n\
+\n\
+\n\
+\u{203a} 1. Yes, proceed (y)\n\
+  2. Yes, and don't ask again for commands that start with\n\
+     `touch ~/demo.txt` (p)\n\
+  3. No, and tell Codex what to do differently (esc)\n\
+\n\
+  Press enter to confirm or esc to cancel\n";
+
+#[test]
+fn fast_settle_answers_the_real_codex_dialog_well_under_a_second() {
+    // End to end with the dialog codex 0.163 actually renders: an armed
+    // Pane is answered on the fast settle, measured from the moment the
+    // complete dialog is visible on the Pane to the moment the provider's
+    // bare-Enter approval lands back in the agent's input. The bound is
+    // one second; the design point is ~0.1 s (one minimal observation
+    // interval plus the poll wakeup), and anything near the generic 5 s
+    // dwell means the fast path regressed to the slow one.
+    let dir = common::temp_dir("delegation-codex-live");
+    let start = codex_hook_file(
+        &dir,
+        "start",
+        json!({"hook_event_name": "SessionStart", "session_id": "c-1", "cwd": "/tmp/demo"}),
+    );
+    let dialog = dir.join("dialog");
+    std::fs::write(&dialog, CODEX_LIVE_DIALOG).unwrap();
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; read release; printf '\\033[2J\\033[H'; cat '{dialog}'; read first; echo \"FIRST:$first\" >> '{out}'; read go",
+            start = cat(&[start]),
+            dialog = dialog.display(),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "c-1");
+    harness.control.arm(harness.pane);
+    // Release the dialog only after the arm, the real flow: the settle
+    // clock starts when the completing write lands, not at arm time.
+    harness.control.type_line(harness.pane, "release");
+    let mut seen = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while seen.is_none() {
+        if harness
+            .control
+            .read(harness.pane)
+            .contains("Press enter to confirm")
+        {
+            seen = Some(Instant::now());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the dialog never rendered: {}",
+            harness.control.read(harness.pane)
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let seen = seen.unwrap();
+    let content = until_file_contains(&answers, "FIRST:");
+    let answered = seen.elapsed();
+    assert!(
+        answered < Duration::from_secs(1),
+        "an armed Pane's settled dialog took {answered:?} to answer; the fast settle regressed toward the 5 s dwell"
+    );
+    // The codex approval contract is the bare carriage return: `read`
+    // unblocked with an empty line, nothing else was typed.
+    assert_eq!(content.trim(), "FIRST:", "{content:?}");
+    // The verdict rode the normal rails: one recorded allow for the codex
+    // agent, keyed on the prompt-region fingerprint, not a rule summary.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let log = loop {
+        let log = events(&harness.socket);
+        if !decisions(&log).is_empty() {
+            break log;
+        }
+        assert!(Instant::now() < deadline, "decision never recorded");
+        thread::sleep(Duration::from_millis(50));
+    };
+    let records = decisions(&log);
+    assert_eq!(records[0]["record"]["verdict"]["outcome"], "allow");
+    assert_eq!(records[0]["record"]["agent"], "codex");
+    assert!(
+        records[0]["record"]["preview"]
+            .as_str()
+            .unwrap()
+            .contains("touch ~/demo.txt"),
+        "the fingerprint identifies this dialog: {records:?}"
+    );
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn fast_settle_falls_back_to_the_dwell_for_an_outsize_dialog() {
+    // The fail-safe shape: a dialog whose anchored question line sits
+    // beyond even the taller dialog region never completes the signature,
+    // so the fast settle stays out of the way and the generic permission
+    // dwell still answers the armed Pane on the normal path.
+    let dir = common::temp_dir("delegation-outsize-dialog");
+    let start = codex_hook_file(
+        &dir,
+        "start",
+        json!({"hook_event_name": "SessionStart", "session_id": "c-1", "cwd": "/tmp/demo"}),
+    );
+    // Question on rows 1-2, twenty-three padding rows, then options and
+    // footer at the bottom of the 30-row screen: the bottom-24 dialog
+    // region holds the options and footer but not the question.
+    let mut dialog = String::from("  Would you like to run the following command?\n\n");
+    for line in 0..23 {
+        dialog.push_str(&format!("  Reason: padding line {line}\n"));
+    }
+    dialog.push_str(
+        "\u{203a} 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel",
+    );
+    let dialog_path = dir.join("dialog");
+    std::fs::write(&dialog_path, dialog).unwrap();
+    let answers = dir.join("answers");
+    let mut harness = harness(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; printf '\\033[2J\\033[H'; cat '{dialog}'; read first; echo \"FIRST:$first\" >> '{out}'; read go",
+            start = cat(&[start]),
+            dialog = dialog_path.display(),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "c-1");
+    harness.control.arm(harness.pane);
+    // Well past the 0.1 s settle but before the 5 s dwell: the signature
+    // never completed, so nothing is typed and no verdict is recorded.
+    assert_file_stays_absent_for(&answers, "FIRST:", Duration::from_secs(3));
+    assert!(
+        decisions(&events(&harness.socket)).is_empty(),
+        "an outsize dialog was answered early"
+    );
+    // The dwell path is intact: the footer alone still matches the codex
+    // permission screen rule, the item surfaces, and the armed Pane gets
+    // its bare-Enter approval on the normal path.
+    until_file_contains(&answers, "FIRST:");
+    harness.control.type_line(harness.pane, "go");
 }

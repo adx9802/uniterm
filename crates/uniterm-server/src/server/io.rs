@@ -493,6 +493,20 @@ impl Server {
                         bound_agent: pane.agent.as_ref().map(|agent| agent.id.clone()),
                     });
                 }
+                // The delegation fast settle's quiet clock rides this same
+                // output batch: it re-arms only when the dialog region
+                // actually changed, so title-only animation cannot starve it
+                // and idle panes pay nothing (the tick itself is one-shot).
+                // The region is taller than the status tail above: a complete
+                // provider dialog (question, reason, command, options,
+                // footer) runs past the twelve rows the screen rules scan,
+                // and only armed panes pay for the wider read.
+                if self.delegated.contains_key(&pane_id) {
+                    let dialog_tail = pane
+                        .term
+                        .evidence_text(super::delegate::DIALOG_REGION_LINES);
+                    super::delegate::track_delegation_settle(pane, true, &dialog_tail);
+                }
                 let dev_tail = pane.term.recent_output_text(12);
                 let dev_hash = evidence_hash(&dev_tail);
                 if dev_hash != pane.last_dev_server_evidence_hash {

@@ -30,7 +30,28 @@
 //! The armed set is live-only by design: replay restores the waiting queue
 //! but never the arms, so re-arming after a restart is the human's fresh
 //! consent. Nothing here wakes the loop; evaluation runs only when a waiting
-//! item is created or replaced, or when a human arms.
+//! item is created or replaced, when a human arms, or when an armed Pane's
+//! fast settle fires.
+//!
+//! The fast settle is the delegation-only answer path that skips the generic
+//! permission dwell for screen-detected prompts: when an ARMED Pane's
+//! dialog region shows the provider's COMPLETE permission-dialog signature
+//! (question line, options, and footer, all provider-owned data) and the
+//! region then stays byte-stable for one minimal observation interval
+//! (`DELEGATION_SETTLE`), the verdict path runs with that signature standing
+//! in for the not-yet-smoothed permission status. The dialog region is
+//! taller than the twelve rows the status rules scan: a real rendered
+//! dialog (codex 0.163 draws about seventeen rows once its reason line and
+//! command wrap) pushes the anchored question line out of the status
+//! window, which is exactly why the fast settle must read further up than
+//! the fallback. The settle tick is one-shot and damage-gated like the
+//! detection dwells: armed by a region write that completes the signature,
+//! re-armed by every later region write that still shows it, cleared by any
+//! write that breaks it, and consumed when it fires. A partial or
+//! still-rendering dialog never completes the signature, so nothing is ever
+//! answered early; the smoothed status and the dwell are untouched, and a
+//! withhold leaves the normal dwell path to surface the item to the human
+//! exactly as before.
 
 use super::*;
 
@@ -51,6 +72,54 @@ const LOOP_GUARD_MS: u64 = 60_000;
 /// dialog from another, and the actionable rows (command, options, footer)
 /// sit at the very bottom, so it keeps the status region's bound.
 const PROMPT_REGION_LINES: usize = 12;
+
+/// Rows of the bottom region the fast settle scans for the provider's
+/// COMPLETE permission-dialog signature, deliberately taller than the
+/// status evidence tail: the anchored question line is the top of the
+/// rendered dialog, and a real codex 0.163 approval (title, environment
+/// and reason lines, wrapped command, wrapped options, footer) draws
+/// about seventeen rows, so a twelve-row window saw the options and
+/// footer but never the question and the settle could never arm. A
+/// dialog taller than the region simply never completes its signature
+/// and falls back to the generic dwell; the region is read once per
+/// output batch per armed Pane and once per verdict, never per frame.
+pub(super) const DIALOG_REGION_LINES: usize = 24;
+
+/// How long an armed Pane's dialog region must stay byte-stable with the
+/// complete permission dialog on screen before the fast settle evaluates
+/// it: one minimal observation interval, long enough to outlast a
+/// multi-frame paint burst (two ratatui frames land well under this
+/// apart) and short enough that the answer lands about a tenth of a
+/// second after the signature completes. This is a one-shot,
+/// damage-gated deadline like the detection dwells, never a free-running
+/// tick: every region write that still shows the full signature re-arms
+/// it, a write that breaks the signature clears it, and firing consumes
+/// it. The residual floor is the mio poll wakeup at the deadline itself,
+/// measured end to end at about 0.1-0.3 s from dialog write to queued
+/// answer bytes (see the delegation integration tests).
+pub(super) const DELEGATION_SETTLE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Arm, re-arm, or clear one Pane's fast-settle deadline after its evidence
+/// region changed. Only an armed Pane ever carries the deadline, and only
+/// while its screen shows the provider's COMPLETE permission dialog; a
+/// region change re-arms the quiet clock, a broken signature clears the
+/// tick, and a region that did not change leaves the clock running, so the
+/// deadline fires only after an uninterrupted quiet settle.
+pub(super) fn track_delegation_settle(pane: &mut Pane, armed: bool, tail: &str) {
+    let complete = armed
+        && pane
+            .agent
+            .as_ref()
+            .is_some_and(|agent| crate::providers::complete_permission_dialog(&agent.id, tail));
+    if !complete {
+        pane.delegation_settle = None;
+        return;
+    }
+    let hash = super::agents::evidence_hash(tail);
+    if pane.delegation_settle.map(|(_, armed_hash)| armed_hash) != Some(hash) {
+        pane.delegation_settle = Some((std::time::Instant::now() + DELEGATION_SETTLE, hash));
+    }
+}
 
 /// The loop-guard identity and audit preview for a screen-detected
 /// (Phase-0 stringly) prompt: a bounded, normalized fingerprint of the
@@ -159,6 +228,14 @@ impl Server {
         // A prompt already on screen is the likely reason the human armed,
         // so evaluate it immediately rather than waiting for the next item.
         self.delegate_waiting_for_pane(reg, pane);
+        // When the complete dialog is already settled on screen the fast
+        // path can start its quiet clock now instead of at the next write.
+        if self.delegated.contains_key(&pane) {
+            if let Some(pane_state) = self.panes.get_mut(&pane) {
+                let tail = pane_state.term.evidence_text(DIALOG_REGION_LINES);
+                track_delegation_settle(pane_state, true, &tail);
+            }
+        }
         match self.delegation_entry(pane) {
             Some(entry) => Ok(entry),
             None => Err((
@@ -206,6 +283,9 @@ impl Server {
             return false;
         };
         self.pending_delegation.retain(|pending| *pending != pane);
+        if let Some(pane_state) = self.panes.get_mut(&pane) {
+            pane_state.delegation_settle = None;
+        }
         self.append_event(crate::eventlog::LogEvent::DelegationDisarmed {
             pane,
             invocation: state.invocation,
@@ -251,7 +331,7 @@ impl Server {
             );
         };
         let (verdict, _, _, _) =
-            self.delegation_verdict(pane, state, item, super::guardrail::unix_time_ms());
+            self.delegation_verdict(pane, state, item, super::guardrail::unix_time_ms(), false);
         (true, verdict)
     }
 
@@ -282,15 +362,98 @@ impl Server {
         }
     }
 
+    /// Fire every due fast-settle deadline. Firing consumes the one-shot
+    /// tick; each Pane is then re-verified from scratch (still armed, same
+    /// invocation, the complete signature still on screen) before anything
+    /// is evaluated, so a stale deadline can never answer a moved dialog.
+    pub(super) fn flush_delegation_settles(&mut self, reg: &Registry) {
+        let now = std::time::Instant::now();
+        let due: Vec<PaneId> = self
+            .panes
+            .iter_mut()
+            .filter_map(|(id, pane)| {
+                if pane
+                    .delegation_settle
+                    .is_some_and(|(deadline, _)| now >= deadline)
+                {
+                    pane.delegation_settle = None;
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for pane in due {
+            self.delegate_settled_dialog(reg, pane);
+        }
+    }
+
+    /// Answer an armed Pane's settled permission dialog without waiting for
+    /// the generic permission dwell. The smoothed status is deliberately
+    /// untouched: a withhold leaves the normal dwell path to surface the
+    /// item to the human exactly as if the fast path had never run.
+    fn delegate_settled_dialog(&mut self, reg: &Registry, pane: PaneId) {
+        let Some(state) = self.delegated.get(&pane).cloned() else {
+            return;
+        };
+        let Some(pane_state) = self.panes.get(&pane) else {
+            return;
+        };
+        let Some(agent) = pane_state.agent.as_ref() else {
+            return;
+        };
+        if agent.id != state.agent {
+            return;
+        }
+        let invocation = agent.foreground_pid.or(pane_state.foreground_pid);
+        if invocation != state.invocation {
+            return;
+        }
+        // Re-verify the complete signature against the live screen at fire
+        // time: a partial, vanished, or still-rendering dialog is never
+        // answered (constraint: stray keystrokes must never land in an
+        // input box).
+        let tail = pane_state.term.evidence_text(DIALOG_REGION_LINES);
+        if !crate::providers::complete_permission_dialog(&agent.id, &tail) {
+            return;
+        }
+        // Once the Pane has a waiting item the dwell path owns it, either
+        // because the smoothed status already flipped or because a
+        // structured prompt arrived while the settle was pending.
+        if self.waiting.items().iter().any(|item| item.pane == pane) {
+            return;
+        }
+        // Create the item the verdict path evaluates, shaped like the item
+        // the permission dwell would have created from the same screen, so
+        // the audit trail reads identically on either path.
+        let name = uniterm_core::agent::agent_name(&agent.id);
+        let summary = format!("{name} is waiting for permission");
+        let change = self.waiting.request(
+            pane,
+            invocation,
+            uniterm_core::WaitingKind::Permission,
+            &summary,
+        );
+        self.record_waiting_change(change);
+        // The verdict below IS this item's delegation pass, so it must not
+        // be queued for a second, status-gated verdict on the next flush.
+        self.pending_delegation.retain(|pending| *pending != pane);
+        self.delegate_waiting_with_proof(reg, pane, true);
+    }
+
     /// The verdict for one Pane's active item: invocation scoping gates
     /// around the pure core kind gate. Returns the verdict plus the tool and
-    /// preview the record must carry.
+    /// preview the record must carry. `settled_screen` is the fast settle's
+    /// proof: the provider's complete dialog signature stood quiet on screen
+    /// for the whole settle, standing in for the not-yet-smoothed permission
+    /// status.
     fn delegation_verdict(
         &self,
         pane: PaneId,
         state: &DelegationState,
         item: &uniterm_core::WaitingItem,
         now_ms: u64,
+        settled_screen: bool,
     ) -> (
         uniterm_core::DelegateVerdict,
         String,
@@ -327,7 +490,7 @@ impl Server {
         if current_invocation != state.invocation {
             return withhold("the invocation changed since the arm");
         }
-        if agent.status != uniterm_core::AgentStatus::Permission {
+        if agent.status != uniterm_core::AgentStatus::Permission && !settled_screen {
             return withhold("the agent is no longer at a permission prompt");
         }
         if item.invocation.is_some() && item.invocation != current_invocation {
@@ -429,10 +592,18 @@ impl Server {
     /// Evaluate one Pane's active waiting item and, on Allow, type the
     /// provider's approval reply. The DelegationDecision record is appended
     /// BEFORE any bytes are queued, so the audit trail exists even when
-    /// typing fails. On Withhold the item stays with the human. The
-    /// always/yes memory is keyed on the prompt-region fingerprint for
-    /// screen-detected prompts.
+    /// typing fails. On Withhold the item stays with the human.
     fn delegate_waiting_for_pane(&mut self, reg: &Registry, pane: PaneId) {
+        self.delegate_waiting_with_proof(reg, pane, false);
+    }
+
+    /// The shared verdict-and-answer pass. `settled_screen` is the fast
+    /// settle's proof that the complete permission dialog is live on screen;
+    /// everything else - the kind gate, invocation scoping, the loop guard,
+    /// the budget, the always/yes memory keyed on the prompt-region
+    /// fingerprint, the audit record, and the guarded delivery - is
+    /// identical to the dwell path.
+    fn delegate_waiting_with_proof(&mut self, reg: &Registry, pane: PaneId, settled_screen: bool) {
         let Some(state) = self.delegated.get(&pane).cloned() else {
             return;
         };
@@ -447,7 +618,7 @@ impl Server {
         };
         let now_ms = super::guardrail::unix_time_ms();
         let (verdict, tool, preview, disarm_reason) =
-            self.delegation_verdict(pane, &state, &item, now_ms);
+            self.delegation_verdict(pane, &state, &item, now_ms, settled_screen);
         let allow = matches!(verdict, uniterm_core::DelegateVerdict::Allow);
         self.append_event(crate::eventlog::LogEvent::DelegationDecision {
             record: uniterm_core::DelegationRecord {
@@ -468,7 +639,9 @@ impl Server {
         }
         // Revalidate between the recorded decision and the side effect (the
         // waiting_action Answer precedent): the prompt must still be live
-        // for the armed invocation.
+        // for the armed invocation. The fast settle's proof is re-checked
+        // against the live screen, so a dialog that moved since the deadline
+        // fired is never answered.
         let current_invocation = self
             .panes
             .get(&pane)
@@ -479,13 +652,18 @@ impl Server {
                     .get(&pane)
                     .and_then(|pane_state| pane_state.foreground_pid)
             });
-        let still_live = self
-            .panes
-            .get(&pane)
-            .and_then(|pane_state| pane_state.agent.as_ref())
-            .is_some_and(|agent| {
-                agent.id == state.agent && agent.status == uniterm_core::AgentStatus::Permission
+        let prompt_live = self.panes.get(&pane).is_some_and(|pane_state| {
+            pane_state.agent.as_ref().is_some_and(|agent| {
+                agent.id == state.agent
+                    && (agent.status == uniterm_core::AgentStatus::Permission
+                        || (settled_screen
+                            && crate::providers::complete_permission_dialog(
+                                &agent.id,
+                                &pane_state.term.evidence_text(DIALOG_REGION_LINES),
+                            )))
             })
+        });
+        let still_live = prompt_live
             && current_invocation == state.invocation
             && self.waiting.get(item.id).is_some();
         let Some(yes_reply) = crate::providers::approval_reply(&state.agent) else {

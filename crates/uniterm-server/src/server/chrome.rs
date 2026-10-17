@@ -382,6 +382,10 @@ impl Server {
                     .as_ref()
                     .map(|copy| copy.at_bottom(pane.term.grid()));
                 pane.term.resize(rect.w, rect.h);
+                // A resize reflows the dialog region, so an armed fast
+                // settle is stale; the provider's repaint re-arms it from
+                // the new geometry when the full signature lands again.
+                pane.delegation_settle = None;
                 if let (Some(copy), Some(at_bottom)) = (pane.copy.as_mut(), at_bottom) {
                     copy.resize(pane.term.grid(), *rect, at_bottom);
                 }

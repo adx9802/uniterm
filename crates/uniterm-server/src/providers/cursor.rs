@@ -99,6 +99,21 @@ pub(super) const APPROVAL_REPLY: &str = "y";
 /// yes-reply from then on.
 pub(super) const ALWAYS_REPLY: &str = "a";
 
+/// Cursor Agent's complete permission dialog: the approval header, the
+/// key-labeled options, and the skip footer all visible at once. A screen
+/// showing only part of that triple is still rendering and must never be
+/// answered early.
+pub(super) const DIALOG_SIGNATURE: super::DialogSignature = super::DialogSignature {
+    question: &[
+        "approval required",
+        "approve this command",
+        "allow this command",
+        "write to this file?",
+    ],
+    options: &["run (once) (y)"],
+    footer: &["skip (esc or n)"],
+};
+
 pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
     prefix: &[],
     prompt_flag: None,
