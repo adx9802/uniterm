@@ -18,7 +18,6 @@
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,20 +27,13 @@ use uniterm_server::Server;
 
 mod common;
 
-use common::{isolate_state, unique_workspace_name};
+use common::{isolate_config, isolate_state, unique_workspace_name};
 
-/// `run_server` reads `XDG_CONFIG_HOME` on boot; keep it empty so no real
-/// user config can leak into a test Workspace. Same shape as isolate_state.
-fn isolate_config() -> PathBuf {
-    static CONFIG: OnceLock<PathBuf> = OnceLock::new();
-    let dir = CONFIG.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("uniterm-test-config-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    });
-    std::env::set_var("XDG_CONFIG_HOME", dir);
-    dir.clone()
-}
+/// Serializes tests that touch the isolated config file. `save_config_atomic`
+/// resolves `XDG_CONFIG_HOME` at write time and every test in this binary
+/// shares one isolated directory, so a save one test fires must never land
+/// in the middle of another test's file assertions.
+static CONFIG_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct Control {
     workspace: String,
@@ -892,6 +884,7 @@ fn yolo_mode_settings_toggle_flips_at_runtime() {
     // nothing arms retroactively, fresh invocations auto-arm only while it
     // is on, and turning it off leaves current arms alive - the same
     // semantics as a config edit plus reload, with no restart.
+    let _config_file = CONFIG_FILE_LOCK.lock().unwrap();
     let dir = common::temp_dir("delegation-yolo");
     let start = hook_file(&dir, "start", session_start("s-1"));
     let restart = hook_file(&dir, "restart", session_start("s-2"));
@@ -994,6 +987,7 @@ fn yolo_mode_first_attach_reports_the_boot_config_and_open_writes_nothing() {
     // refreshing the surface must never rewrite the file, and a patch that
     // does not name `delegation_auto_arm` must leave the key (and the rest
     // of the hand-edited file) untouched.
+    let _config_file = CONFIG_FILE_LOCK.lock().unwrap();
     isolate_state();
     let config_root = isolate_config();
     let config_dir = config_root.join("uniterm");
