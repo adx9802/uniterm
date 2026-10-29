@@ -20,7 +20,19 @@
 //! never delegated), the hourly answer budget (an arm that spends it
 //! disarms itself until the human re-arms), and the identical-re-ask loop
 //! guard, which withholds a prompt that comes straight back after being
-//! plainly approved - but never blocks the always-to-yes escalation. The
+//! plainly approved - but never blocks the always-to-yes escalation.
+//!
+//! Yolo Mode (`delegation-auto-arm`) is the human's standing consent to
+//! approve every permission prompt, so while it is on the budget does not
+//! apply and every live supported-provider Pane is kept armed: a fresh
+//! binding arms, the switch flipping on arms every bound Pane, and a
+//! permission prompt from an unarmed Pane arms it on the spot. Only an
+//! explicit human disarm of the current invocation is honoured; a new
+//! invocation is fresh. Under Yolo Mode the loop guard narrows to what it
+//! must still catch: the transient re-check that fires before the previous
+//! keystroke landed (`YOLO_REASK_SETTLE_MS`) and a dialog that keeps
+//! cycling identically (`YOLO_MAX_IDENTICAL_REPEATS`); an agent that
+//! legitimately runs the same command twice a minute apart is answered. The
 //! identity the guard and the always/yes memory key on is the structured
 //! tool+preview for OSC 777 prompts, and for screen-detected prompts a
 //! bounded fingerprint of the live prompt region captured at verdict time:
@@ -29,9 +41,10 @@
 //!
 //! The armed set is live-only by design: replay restores the waiting queue
 //! but never the arms, so re-arming after a restart is the human's fresh
-//! consent. Nothing here wakes the loop; evaluation runs only when a waiting
-//! item is created or replaced, when a human arms, or when an armed Pane's
-//! fast settle fires.
+//! consent (or Yolo Mode's, as each restored agent binds anew). Nothing
+//! here wakes the loop; evaluation runs only when a waiting item is created
+//! or replaced, when a human arms or flips Yolo Mode on, or when an armed
+//! Pane's fast settle fires.
 //!
 //! The fast settle is the delegation-only answer path that skips the generic
 //! permission dwell for screen-detected prompts: when an ARMED Pane's
@@ -64,6 +77,17 @@ const BUDGET_WINDOW_MS: u64 = 3_600_000;
 /// did not stick, and typing the same approval again would spin without a
 /// human in the loop.
 const LOOP_GUARD_MS: u64 = 60_000;
+
+/// Under Yolo Mode, how soon after an answer an identical prompt is still
+/// the same dialog waiting for the keystroke to land: the pinned-status
+/// re-check fires within milliseconds of the answer, and typing again then
+/// would leak a second reply into whatever the agent shows next.
+const YOLO_REASK_SETTLE_MS: u64 = 2_000;
+
+/// Under Yolo Mode, how many consecutive identical answers (each inside the
+/// loop window of the previous) are allowed before the dialog is treated as
+/// an approval that never sticks and handed to the human.
+const YOLO_MAX_IDENTICAL_REPEATS: u16 = 10;
 
 /// Rows of the prompt region a screen-detected prompt fingerprints: the
 /// same cursor-to-bottom region the provider screen rules scan
@@ -162,12 +186,41 @@ pub(super) struct DelegationState {
     window_started_ms: u64,
     /// Approvals typed within the current window.
     answers_used: u16,
-    /// The last answered prompt: its (tool, preview) identity, when, and
-    /// whether the provider's always-reply was typed. A first sighting gets
-    /// the always-reply; a re-surfaced prompt gets the plain yes-reply
-    /// once; an identical re-ask after that yes is the loop the guard
-    /// withholds.
-    last_answered: Option<(String, String, u64, bool)>,
+    /// The last answered prompt. A first sighting gets the always-reply; a
+    /// re-surfaced prompt gets the plain yes-reply once; an identical
+    /// re-ask after that yes is the loop the guard withholds.
+    last_answered: Option<LastAnswer>,
+}
+
+/// The last prompt one arm answered, keyed by its (tool, preview) identity.
+#[derive(Clone)]
+struct LastAnswer {
+    tool: String,
+    preview: String,
+    at_ms: u64,
+    /// Whether the provider's always-reply was typed.
+    used_always: bool,
+    /// Consecutive identical answers, each inside the loop window of the
+    /// previous one.
+    repeats: u16,
+}
+
+/// Whether an identical prompt re-asked after `last` is a loop the guard
+/// withholds. An always-reply is never a loop: its resurface is owed the
+/// plain yes once. Without Yolo Mode any identical re-ask inside the loop
+/// window after a plain yes withholds. Under Yolo Mode only the transient
+/// re-check before the keystroke landed and a dialog that keeps cycling
+/// identically withhold, so a command legitimately re-run is answered.
+fn reask_is_loop(last: &LastAnswer, tool: &str, preview: &str, now_ms: u64, yolo: bool) -> bool {
+    if last.used_always || last.tool != tool || last.preview != preview {
+        return false;
+    }
+    let since = now_ms.saturating_sub(last.at_ms);
+    if !yolo {
+        return since < LOOP_GUARD_MS;
+    }
+    since < YOLO_REASK_SETTLE_MS
+        || (since < LOOP_GUARD_MS && last.repeats >= YOLO_MAX_IDENTICAL_REPEATS)
 }
 
 /// Remaining budget with the lazy window reset applied. A window that
@@ -221,6 +274,7 @@ impl Server {
         let invocation = agent.foreground_pid.or(pane_state.foreground_pid);
         let now_ms = super::guardrail::unix_time_ms();
         let policy = self.config.delegation_policy();
+        self.delegation_opt_out.remove(&pane);
         // Re-arming is a fresh consent: the budget, the answer counter, and
         // the always/yes memory reset.
         self.delegated.insert(
@@ -259,33 +313,61 @@ impl Server {
         }
     }
 
-    /// Arm a freshly bound invocation when `delegation-auto-arm` is on. The
-    /// config key IS the human's standing consent for this path, so the
+    /// Keep one Pane armed while Yolo Mode (`delegation-auto-arm`) is on.
+    /// The config key IS the human's standing consent for this path, so the
     /// control `confirmed` flag does not apply here; the arm goes through
     /// the same internal path as `arm_delegation` (same `DelegationArmed`
     /// event, same immediate evaluation pass over an active waiting item).
-    /// Providers without a verified approval reply are skipped silently:
-    /// arming was never possible for them, so an event would be spam, not a
-    /// decision. This runs only when a genuinely new invocation binds, never
-    /// from a verdict, so an arm is never quietly re-created underneath the
-    /// human within one invocation - and a `budget_exhausted` disarm in
-    /// particular is never auto-re-armed: spending the budget hands the
-    /// prompts back until the human re-arms or a new invocation binds.
+    /// It runs when an invocation binds, when the switch flips on, and when
+    /// an unarmed Pane raises a permission prompt, so no supported Pane
+    /// silently stays unarmed. An already-armed Pane is left alone (its
+    /// always/yes memory is live state), providers without a verified
+    /// approval reply are skipped silently (an event would be spam, not a
+    /// decision), and an invocation the human explicitly disarmed stays
+    /// disarmed until it ends.
     pub(super) fn maybe_auto_arm_delegation(&mut self, reg: &Registry, pane: PaneId) {
         if !self.config.delegation_auto_arm {
             return;
         }
-        let supported = self
-            .panes
-            .get(&pane)
-            .and_then(|pane_state| pane_state.agent.as_ref())
-            .is_some_and(|agent| crate::providers::approval_reply(&agent.id).is_some());
-        if !supported {
+        let Some(pane_state) = self.panes.get(&pane) else {
+            return;
+        };
+        let Some(agent) = pane_state.agent.as_ref() else {
+            return;
+        };
+        if crate::providers::approval_reply(&agent.id).is_none() {
             return;
         }
-        // A refusal only means the target went away between the binding and
-        // now; the next binding is a fresh chance to arm.
+        let invocation = agent.foreground_pid.or(pane_state.foreground_pid);
+        let agent_id = agent.id.clone();
+        if let Some(state) = self.delegated.get(&pane) {
+            if state.agent == agent_id && state.invocation == invocation {
+                return;
+            }
+            // An arm never survives into another invocation or agent.
+            self.disarm_delegation(pane, "invocation_changed");
+        }
+        if self.delegation_opt_out.get(&pane) == Some(&invocation) {
+            return;
+        }
+        // A refusal only means the target went away between the trigger and
+        // now; the next binding or prompt is a fresh chance to arm.
         let _ = self.arm_delegation(reg, pane);
+    }
+
+    /// Arm every live supported-provider Pane, in Pane order, when Yolo Mode
+    /// flips on. A one-shot pass on a human action, never a periodic scan.
+    pub(super) fn auto_arm_all_delegations(&mut self, reg: &Registry) {
+        let mut panes: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, pane)| pane.agent.is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        panes.sort_by_key(|pane| pane.0);
+        for pane in panes {
+            self.maybe_auto_arm_delegation(reg, pane);
+        }
     }
 
     /// Stop delegated answering for one Pane, recording why. Returns whether
@@ -293,9 +375,19 @@ impl Server {
     /// invocation change, budget) go through the same path so the event log
     /// always says when an approval capability ended.
     pub(super) fn disarm_delegation(&mut self, pane: PaneId, reason: &str) -> bool {
+        // Every lifecycle reason ends the invocation an explicit disarm was
+        // scoped to, so the opt-out ends with it.
+        if reason != "disarmed" {
+            self.delegation_opt_out.remove(&pane);
+        }
         let Some(state) = self.delegated.remove(&pane) else {
             return false;
         };
+        if reason == "disarmed" {
+            // An explicit human disarm outranks Yolo Mode for the rest of
+            // this invocation.
+            self.delegation_opt_out.insert(pane, state.invocation);
+        }
         self.pending_delegation.retain(|pending| *pending != pane);
         if let Some(pane_state) = self.panes.get_mut(&pane) {
             pane_state.delegation_settle = None;
@@ -356,7 +448,9 @@ impl Server {
         if item.kind != uniterm_core::WaitingKind::Permission {
             return;
         }
-        if !self.delegated.contains_key(&item.pane) {
+        // Under Yolo Mode an unarmed Pane's permission prompt is queued
+        // too: the flush arms it, and that arm's immediate pass answers.
+        if !self.delegated.contains_key(&item.pane) && !self.config.delegation_auto_arm {
             return;
         }
         if !self.pending_delegation.contains(&item.pane) {
@@ -372,7 +466,11 @@ impl Server {
         }
         let panes = std::mem::take(&mut self.pending_delegation);
         for pane in panes {
-            self.delegate_waiting_for_pane(reg, pane);
+            if self.delegated.contains_key(&pane) {
+                self.delegate_waiting_for_pane(reg, pane);
+            } else {
+                self.maybe_auto_arm_delegation(reg, pane);
+            }
         }
     }
 
@@ -556,12 +654,9 @@ impl Server {
         // never block the always-to-yes escalation: when the previous answer
         // to this identity was the always reply, the resurface gets the yes
         // reply once, and only an identical re-ask after THAT withholds.
-        if let Some((last_tool, last_preview, at_ms, used_always)) = &state.last_answered {
-            if !used_always
-                && *last_tool == tool
-                && *last_preview == preview
-                && now_ms.saturating_sub(*at_ms) < LOOP_GUARD_MS
-            {
+        let yolo = self.config.delegation_auto_arm;
+        if let Some(last) = &state.last_answered {
+            if reask_is_loop(last, &tool, &preview, now_ms, yolo) {
                 return (
                     uniterm_core::DelegateVerdict::Withhold {
                         reason: "the identical prompt was auto-answered moments ago, so this re-ask looks like a loop".into(),
@@ -572,14 +667,16 @@ impl Server {
                 );
             }
         }
-        if budget_remaining(
-            state,
-            self.config.delegation_policy().max_answers_per_hour,
-            now_ms,
-        ) == 0
+        if !yolo
+            && budget_remaining(
+                state,
+                self.config.delegation_policy().max_answers_per_hour,
+                now_ms,
+            ) == 0
         {
             // The only withhold that disarms: an arm that cannot afford the
-            // next answer would look live while approving nothing.
+            // next answer would look live while approving nothing. Yolo Mode
+            // is standing consent to approve everything, so it has no budget.
             return (
                 uniterm_core::DelegateVerdict::Withhold {
                     reason: "the hourly answer budget is exhausted; re-arm to resume".into(),
@@ -695,14 +792,19 @@ impl Server {
         // ask and the always preference applies again. One verdict types at
         // most one reply, so the two keystrokes never go back to back into
         // a live prompt.
-        let first_sight = state.last_answered.as_ref().is_none_or({
-            let (tool, preview) = (&tool, &preview);
-            move |(last_tool, last_preview, at_ms, _)| {
-                last_tool != tool
-                    || last_preview != preview
-                    || now_ms.saturating_sub(*at_ms) >= LOOP_GUARD_MS
-            }
+        let first_sight = state.last_answered.as_ref().is_none_or(|last| {
+            last.tool != tool
+                || last.preview != preview
+                || now_ms.saturating_sub(last.at_ms) >= LOOP_GUARD_MS
         });
+        let repeats = if first_sight {
+            1
+        } else {
+            state
+                .last_answered
+                .as_ref()
+                .map_or(1, |last| last.repeats.saturating_add(1))
+        };
         let always_reply = crate::providers::always_reply(&state.agent);
         let used_always = first_sight && always_reply.is_some();
         let reply = if used_always {
@@ -727,7 +829,13 @@ impl Server {
                 state.answers_used = 0;
             }
             state.answers_used = state.answers_used.saturating_add(1);
-            state.last_answered = Some((tool, preview, now_ms, used_always));
+            state.last_answered = Some(LastAnswer {
+                tool,
+                preview,
+                at_ms: now_ms,
+                used_always,
+                repeats,
+            });
         }
         self.resolve_waiting_for_pane(item.pane, uniterm_core::WaitingResolution::Answered);
         // The answer changes no status, so when a screen or title rule pins
@@ -754,6 +862,7 @@ impl Server {
             armed_at_ms: state.armed_at_ms,
             answers_used: used,
             answers_remaining: policy.max_answers_per_hour.saturating_sub(used),
+            unlimited: self.config.delegation_auto_arm,
         })
     }
 }
@@ -813,19 +922,123 @@ mod tests {
 
     #[test]
     fn a_tall_partial_dialog_never_completes_the_signature() {
-        // The same tall shape without its footer is still rendering:
-        // height never substitutes for the complete triple.
+        // The same tall shape still painting its options (option 1 up, the
+        // closing "No" row and footer not yet) is incomplete: height never
+        // substitutes for the complete triple.
         let mut term = crate::terminal::Terminal::new(120, 30);
         let mut dialog = String::from("  Would you like to run the following command?\r\n\r\n");
         for line in 0..22 {
             dialog.push_str(&format!("  $ git add --verbose-path-{line:02}.rs \\\r\n"));
         }
-        dialog.push_str("\u{203a} 1. Yes, proceed (y)\r\n  2. No, and tell Codex what to do differently (esc)\r\n");
+        dialog.push_str("\u{203a} 1. Yes, proceed (y)\r\n");
         term.feed(format!("\u{1b}[2J\u{1b}[H{dialog}").as_bytes());
         let region = term.evidence_text(DIALOG_REGION_LINES);
         assert!(
             !crate::providers::complete_permission_dialog("codex", &region),
-            "a tall dialog missing its footer must never complete: {region:?}"
+            "a tall dialog missing its closing rows must never complete: {region:?}"
         );
+    }
+
+    #[test]
+    fn a_codex_165_dialog_without_its_footer_completes_on_a_real_grid() {
+        // Codex 0.165's two-option dialog with the footer clipped: the
+        // final "No" row closes the dialog, so the fast settle still fires.
+        let mut term = crate::terminal::Terminal::new(120, 30);
+        term.feed(
+            "\u{1b}[2J\u{1b}[H  Would you like to run the following command?\r\n\r\n  Reason: Access the already-authorized local Uniterm workspace to coordinate analysis agents.\r\n\r\n  $ ut agent list --json\r\n\r\n\u{203a} 1. Yes, proceed (y)\r\n  2. No, and tell Codex what to do differently (esc)\r\n"
+                .as_bytes(),
+        );
+        let region = term.evidence_text(DIALOG_REGION_LINES);
+        assert!(
+            crate::providers::complete_permission_dialog("codex", &region),
+            "{region:?}"
+        );
+    }
+
+    fn answered(at_ms: u64, used_always: bool, repeats: u16) -> LastAnswer {
+        LastAnswer {
+            tool: "unknown".into(),
+            preview: "$ ut agent list --json".into(),
+            at_ms,
+            used_always,
+            repeats,
+        }
+    }
+
+    #[test]
+    fn without_yolo_mode_any_identical_reask_inside_the_window_is_a_loop() {
+        let last = answered(1_000, false, 1);
+        let (tool, preview) = ("unknown", "$ ut agent list --json");
+        assert!(reask_is_loop(&last, tool, preview, 1_010, false));
+        assert!(reask_is_loop(
+            &last,
+            tool,
+            preview,
+            1_000 + LOOP_GUARD_MS - 1,
+            false
+        ));
+        assert!(!reask_is_loop(
+            &last,
+            tool,
+            preview,
+            1_000 + LOOP_GUARD_MS,
+            false
+        ));
+        // A distinct prompt and the always-to-yes escalation never loop.
+        assert!(!reask_is_loop(&last, tool, "$ git status", 1_010, false));
+        assert!(!reask_is_loop(
+            &answered(1_000, true, 1),
+            tool,
+            preview,
+            1_010,
+            false
+        ));
+    }
+
+    #[test]
+    fn yolo_mode_answers_a_rerun_command_but_still_catches_real_loops() {
+        let (tool, preview) = ("unknown", "$ ut agent list --json");
+        // The transient re-check before the keystroke landed still withholds.
+        let last = answered(1_000, false, 1);
+        assert!(reask_is_loop(&last, tool, preview, 1_010, true));
+        assert!(reask_is_loop(
+            &last,
+            tool,
+            preview,
+            1_000 + YOLO_REASK_SETTLE_MS - 1,
+            true
+        ));
+        // The same command legitimately re-run seconds later is answered.
+        assert!(!reask_is_loop(
+            &last,
+            tool,
+            preview,
+            1_000 + YOLO_REASK_SETTLE_MS,
+            true
+        ));
+        // A dialog that keeps cycling identically is an approval that never
+        // sticks, handed back to the human until the loop window passes.
+        let cycling = answered(1_000, false, YOLO_MAX_IDENTICAL_REPEATS);
+        assert!(reask_is_loop(
+            &cycling,
+            tool,
+            preview,
+            1_000 + YOLO_REASK_SETTLE_MS,
+            true
+        ));
+        assert!(!reask_is_loop(
+            &cycling,
+            tool,
+            preview,
+            1_000 + LOOP_GUARD_MS,
+            true
+        ));
+        assert!(!reask_is_loop(
+            &answered(1_000, true, 1),
+            tool,
+            preview,
+            1_010,
+            true
+        ));
     }
 }
