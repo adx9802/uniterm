@@ -419,7 +419,9 @@ fn today_cli_notes_live_view_and_restart_share_one_history() {
     server.join().unwrap();
     let server = start();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !socket.exists() {
+    // `ut today list` speaks the control API, whose socket the agent runtime
+    // binds after the attach socket appears.
+    while !socket.exists() || !socket.with_extension("control.sock").exists() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));
     }
