@@ -686,6 +686,10 @@ pub struct Server {
     /// Drained on the run loop's flush block, where a registry is available
     /// for the guarded terminal-delivery path.
     pending_delegation: Vec<PaneId>,
+    /// Invocations a human explicitly disarmed. Yolo Mode keeps every other
+    /// supported Pane armed, but never re-arms underneath an explicit
+    /// disarm of the same invocation; a new invocation is fresh.
+    delegation_opt_out: HashMap<PaneId, Option<i32>>,
     /// Human direction waiting for an exact active agent invocation.
     instructions: uniterm_core::InstructionQueue,
     /// Native run relationships projected from append-only lifecycle events.
@@ -924,6 +928,7 @@ impl Server {
             waiting: uniterm_core::WaitingQueue::new(),
             delegated: HashMap::new(),
             pending_delegation: Vec::new(),
+            delegation_opt_out: HashMap::new(),
             instructions: uniterm_core::InstructionQueue::new(),
             run_graph: uniterm_core::RunGraph::new(),
             run_graph_sequence: 0,
@@ -2214,12 +2219,17 @@ impl Server {
             self.config.guardrail_allowed_projects = selectors;
         }
         if let Some(arm) = patch.delegation_auto_arm {
-            // The Settings "Yolo Mode" switch flips standing consent live,
-            // with the same semantics as a config edit plus reload: nothing
-            // arms or disarms retroactively - existing arms are untouched,
-            // fresh invocations auto-arm only while this is on, and turning
-            // it off stops future auto-arms but leaves current arms alive.
+            // The Settings "Yolo Mode" switch flips standing consent live.
+            // Turning it on arms every live supported-provider Pane at once,
+            // including invocations that bound while it was off: the switch
+            // means "approve everything", so a Pane left unarmed would be
+            // the surprise. Turning it off stops future auto-arms and
+            // restores the hourly budget, but leaves current arms alive.
+            let flipped_on = arm && !self.config.delegation_auto_arm;
             self.config.delegation_auto_arm = arm;
+            if flipped_on {
+                self.auto_arm_all_delegations(reg);
+            }
         }
         if self.file_manager_visible() {
             self.sync_file_manager(false);

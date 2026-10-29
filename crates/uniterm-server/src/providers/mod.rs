@@ -1922,6 +1922,37 @@ mod tests {
         let codex_status_tail = "  Reason: Allow creating ~/demo.txt outside\n  the sandbox with touch?\n\n  $ touch ~/demo.txt\n\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with\n     `touch ~/demo.txt` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n";
         assert!(!complete_permission_dialog("codex", codex_status_tail));
 
+        // The real codex 0.165 approval dialog, as an agent read it from a
+        // live Pane (recorded in a codex session rollout): two options, no
+        // don't-ask-again row, and the footer still below them.
+        let codex_165 = "  Would you like to run the following command?\n\n  Environment: local\n\n  Reason: Access the already-authorized local Uniterm workspace to coordinate analysis agents.\n\n  $ ut agent list --json\n\n\n\u{203a} 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n";
+        assert!(complete_permission_dialog("codex", codex_165));
+        // The same dialog with the footer clipped (the shape seen on a
+        // short pane): the final "No" row closes the dialog on its own.
+        let codex_165_clipped = "Would you like to run the following command?\nReason: Access the already-authorized local Uniterm workspace to coordinate analysis agents.\n$ ut agent list --json\n\u{203a} 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n";
+        assert!(complete_permission_dialog("codex", codex_165_clipped));
+        // Still painting: option 1 is up but the closing "No" row is not.
+        assert!(!complete_permission_dialog(
+            "codex",
+            "Would you like to run the following command?\n$ ut agent list --json\n\u{203a} 1. Yes, proceed (y)\n"
+        ));
+        // The bare-Enter reply confirms the SELECTED row, so a dialog whose
+        // selection moved to "No" must never complete: Enter would deny.
+        assert!(!complete_permission_dialog(
+            "codex",
+            "Would you like to run the following command?\n$ ut agent list --json\n  1. Yes, proceed (y)\n\u{203a} 2. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n"
+        ));
+        // The status rule alone (what typed prompt text could imitate) is
+        // not the signature: without the selected option 1 nothing fires.
+        assert!(!complete_permission_dialog(
+            "codex",
+            "\u{203a} would you like to run the following command? press enter to confirm\n"
+        ));
+        // Codex has no don't-ask-again reply, so the two-option dialog's
+        // answer is the bare Enter on option 1 in every shape.
+        assert_eq!(always_reply("codex"), None);
+        assert_eq!(approval_reply("codex"), Some(""));
+
         let cursor = "Approval required\n  $ cargo test\n❯ run (once) (y)\n  run everything (a)\n  skip (esc or n)\n";
         assert!(complete_permission_dialog("cursor", cursor));
         assert!(!complete_permission_dialog(

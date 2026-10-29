@@ -233,15 +233,28 @@ pub(super) fn global_files() -> Vec<(String, std::path::PathBuf)> {
 /// Interactive CLI arguments, kept beside this provider's detection rules.
 /// What a human types to approve this provider's permission prompt once.
 /// Codex asks to "press enter to confirm", so the delegated reply is an
-/// empty paste whose submit contributes exactly the bare carriage return.
+/// empty paste whose submit contributes exactly the bare carriage return,
+/// which confirms the selected row; option 1 ("Yes, proceed") is selected
+/// when the dialog opens, and the fast settle requires that selection.
 /// Kept beside the detection rules so nothing outside this module branches
 /// on the agent id.
 pub(super) const APPROVAL_REPLY: &str = "";
 
-/// Codex's complete permission dialog: the question line, the numbered
-/// options, and the "press enter to confirm" footer all visible at once. A
-/// screen showing only part of that triple is still rendering and must never
-/// be answered early.
+/// Codex's complete permission dialog: the question line, option 1 (yes)
+/// carrying the selection marker, and the end of the dialog all visible at
+/// once. A screen showing only part of that triple is still rendering and
+/// must never be answered early.
+///
+/// The approval reply is a bare Enter, which confirms the SELECTED row, so
+/// the options component requires the marker on option 1: a dialog whose
+/// selection moved to "No" never completes and stays with the dwell path.
+/// Codex 0.165 draws two options (yes, and "No, and tell Codex what to do
+/// differently") with no don't-ask-again row; 0.163 drew three. Both end
+/// with the "No ... (esc)" row and normally the "Press enter to confirm or
+/// esc to cancel" footer below it, but the footer is the row a short pane
+/// clips first, so the final "No" row also closes the dialog. It is the
+/// last option in every shape, so a dialog still painting its options
+/// cannot show it early.
 pub(super) const DIALOG_SIGNATURE: super::DialogSignature = super::DialogSignature {
     question: &[
         "would you like to run the following command?",
@@ -249,8 +262,11 @@ pub(super) const DIALOG_SIGNATURE: super::DialogSignature = super::DialogSignatu
         "allow command?",
         "trust this folder?",
     ],
-    options: &["1. yes", "2. no"],
-    footer: &["press enter to confirm"],
+    options: &["\u{203a} 1. yes", "\u{276f} 1. yes"],
+    footer: &[
+        "press enter to confirm",
+        "tell codex what to do differently (esc)",
+    ],
 };
 
 pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {

@@ -283,7 +283,8 @@ An armed Pane answers every permission prompt its current invocation raises auto
 The first answer to a prompt prefers the provider's own don't-ask-again reply, and a re-surfaced prompt gets the plain yes-reply once before the guard applies.
 This is the sanctioned exception to the "never send blanket approval keystrokes" rule: the human arms a Pane deliberately, every verdict is recorded in the event log before anything is typed, and the server types the provider's own approval reply through the same guarded path as `ut waiting answer`.
 Never arm a Pane yourself; arming is the human's decision, over the control API it requires `"confirmed": true`, and it never survives a restart, an invocation change, or a Pane close.
-The human may also set `delegation-auto-arm = on` as standing consent - in the client Settings surface this is the "Yolo Mode" switch ("auto type A or Y"); then every fresh agent binding arms itself - but a budget-spent arm is never re-armed inside the same invocation - and agents still never arm anything.
+The human may also set `delegation-auto-arm = on` as standing consent - in the client Settings surface this is the "Yolo Mode" switch ("auto type A or Y"); then every live supported agent Pane is kept armed with no hourly budget (fresh bindings, Panes bound before the switch flipped on, and Panes whose arm dropped), `ut delegate status` reports those arms as unlimited, and only an explicit `ut delegate disarm PANE` holds for the rest of that invocation.
+With Yolo Mode off, a budget-spent arm is never re-armed inside the same invocation, and agents never arm anything either way.
 Questions are never delegated; design and planning prompts always stay with the human.
 
 ## Start and coordinate agents

@@ -68,10 +68,13 @@ Two keys govern delegated answering (see [06-agentic-supervision.md](06-agentic-
 ```ini
 # ~/.config/uniterm/uniterm.conf
 delegation-auto-arm = off # default off
-delegation-max-answers-per-hour = 30 # 1..240, default 30
+delegation-max-answers-per-hour = 30 # 1..240, default 30; ignored while auto-arm is on
 ```
 
 Arming a pane (`ut delegate arm PANE`) approves every permission prompt that invocation raises, structured or screen-detected; there is no command allowlist or deny floor, so the arm is the whole consent.
-When the hourly budget is spent the arm disarms itself until the human re-arms, and with `delegation-auto-arm` on every fresh binding of a provider with a verified approval reply arms itself as standing consent - but a budget-spent arm is never re-armed inside the same invocation.
-The client Settings surface exposes `delegation-auto-arm` as the "Yolo Mode" switch ("auto type A or Y") and flips it live on the running server through the same atomic settings save as every other row: nothing arms retroactively, existing arms survive the flip off, and fresh invocations auto-arm only while it is on.
+With `delegation-auto-arm` off, a manual arm disarms itself when the hourly budget is spent and stays disarmed until the human re-arms.
+With `delegation-auto-arm` on (Yolo Mode), every live pane running a provider with a verified approval reply is kept armed and approves every permission prompt with no hourly budget: fresh bindings arm, turning the switch on arms panes that were already bound, and a pane whose arm dropped is re-armed at its next permission prompt.
+Only an explicit `ut delegate disarm PANE` holds against Yolo Mode, for the rest of that invocation; questions are never auto-answered either way.
+`delegation-max-answers-per-hour` is still validated while Yolo Mode is on and applies again the moment it is turned off, so `ut config check` reports a bad value either way rather than letting Yolo Mode hide it.
+The client Settings surface exposes `delegation-auto-arm` as the "Yolo Mode" switch ("auto type A or Y") and flips it live on the running server through the same atomic settings save as every other row; turning it off leaves current arms alive with the budget restored.
 `ut config check` reports every delegation key problem as an error, and the retired `delegation-allow` key is diagnosed as an unknown key, so an old config cannot look like it still gates approvals.

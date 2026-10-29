@@ -6,8 +6,8 @@
 //! uses. The first answer to a prompt prefers the provider's don't-ask-again
 //! reply; a re-surfaced prompt gets the plain yes-reply once; an identical
 //! re-ask after that yes is the loop the guard withholds. Questions are
-//! never delegated, the hourly budget disarms a spent arm (and auto-arm
-//! never re-arms within that invocation), every verdict is appended to the
+//! never delegated, the hourly budget disarms a spent manual arm (Yolo Mode
+//! has no budget and keeps every supported Pane armed), every verdict is appended to the
 //! event log BEFORE any bytes are typed, lifecycle changes disarm, and a
 //! restart never restores arms.
 //!
@@ -700,77 +700,160 @@ fn budget_exhaustion_disarms_until_rearmed() {
 }
 
 #[test]
-fn auto_arm_never_rearms_a_budget_exhausted_invocation() {
-    // Auto-arm is per invocation: a budget_exhausted disarm hands the
-    // prompts back to the human for the rest of that invocation, and only a
-    // genuinely new binding arms itself again.
-    let dir = common::temp_dir("delegation-auto-arm-budget");
+fn yolo_mode_has_no_hourly_budget() {
+    // Yolo Mode is standing consent to approve everything: with a budget of
+    // one (which a manual arm would spend on its first answer), the auto
+    // arm keeps answering every prompt, never disarms itself, and reports
+    // itself as unlimited.
+    let dir = common::temp_dir("delegation-yolo-budget");
     let start = hook_file(&dir, "start", session_start("s-1"));
-    let restart = hook_file(&dir, "restart", session_start("s-2"));
     let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
+    let ask_two = hook_file(&dir, "ask-two", permission("s-1", "Bash", "git diff"));
+    let idle = plain_file(&dir, "idle", "idle");
     let mut harness = harness_auto_arm(
         &dir,
         1,
         &format!(
-            "{}; read answer; echo \"GOT:$answer\"; read go",
-            cat(&[start, ask])
+            "{}; read a; echo \"A:$a\"; {}; {}; read b; echo \"B:$b\"; read c; echo \"C:$c\"; read d; echo \"D:$d\"; read go",
+            cat(&[start, ask]),
+            cat(&[idle]),
+            cat(&[ask_two])
         ),
     );
     run_agent(&mut harness);
-    // The fresh binding auto-armed and its one budget unit bought the
-    // always-reply; the pinned re-ask then spends the arm.
-    until_output(&mut harness.control, harness.pane, "GOT:2");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let log = events(&harness.socket);
-        if log
-            .iter()
-            .any(|event| event["DelegationDisarmed"]["reason"] == "budget_exhausted")
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "never disarmed: {log:?}");
-        thread::sleep(Duration::from_millis(50));
-    }
-    // The invocation is still alive and unarmed, and stays that way: only a
-    // human re-arm or a new invocation restores answering.
-    let settle = Instant::now() + Duration::from_millis(800);
-    while Instant::now() < settle {
-        assert!(
-            harness.control.delegation_status().is_empty(),
-            "auto-arm re-created an arm inside the budget-exhausted invocation"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    // A fresh invocation in the same Pane auto-arms again with no request.
-    std::fs::write(
-        harness.files.join("second.sh"),
-        format!("{}; read go", cat(&[restart])),
-    )
-    .unwrap();
-    harness.control.type_line(harness.pane, "go");
-    thread::sleep(Duration::from_millis(200));
-    harness.control.type_line(
-        harness.pane,
-        &format!("sh '{}'", harness.files.join("second.sh").display()),
-    );
-    harness
-        .control
-        .until("rebound", |agent| agent["details"]["session_id"] == "s-2");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while harness.control.delegation_status().is_empty() {
-        assert!(Instant::now() < deadline, "second binding never auto-armed");
-        thread::sleep(Duration::from_millis(20));
-    }
+    // Each prompt gets the always-reply and its pinned resurface one yes;
+    // with a budget of one, a manual arm would have stopped after "A".
+    until_output(&mut harness.control, harness.pane, "A:2");
+    until_output(&mut harness.control, harness.pane, "B:");
+    until_output(&mut harness.control, harness.pane, "C:");
+    until_output(&mut harness.control, harness.pane, "D:");
     let log = events(&harness.socket);
+    let allows = decisions(&log)
+        .iter()
+        .filter(|record| record["record"]["verdict"]["outcome"] == "allow")
+        .count();
+    assert!(allows >= 3, "a budget of one capped Yolo Mode: {log:?}");
+    assert!(
+        !log.iter()
+            .any(|event| event["DelegationDisarmed"]["reason"] == "budget_exhausted"),
+        "Yolo Mode spent a budget: {log:?}"
+    );
+    let entries = harness.control.delegation_status();
+    assert_eq!(entries.len(), 1, "{entries:?} {log:?}");
+    assert_eq!(entries[0]["unlimited"], true, "{entries:?}");
     assert_eq!(
         log.iter()
             .filter(|event| event.get("DelegationArmed").is_some())
             .count(),
-        2,
-        "each invocation armed exactly once: {log:?}"
+        1,
+        "the one invocation armed exactly once: {log:?}"
     );
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn yolo_mode_rearms_a_budget_exhausted_pane_when_switched_on() {
+    // A manual arm with Yolo Mode off keeps its budget and spends itself;
+    // flipping Yolo Mode on re-arms that same live invocation and the
+    // prompt that was handed back to the human is answered.
+    let _config_file = CONFIG_FILE_LOCK.lock().unwrap();
+    let dir = common::temp_dir("delegation-yolo-rearm");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
+    let mut harness = harness(
+        &dir,
+        1,
+        &format!(
+            "{}; read a; echo \"A:$a\"; read b; echo \"B:$b\"; read c; echo \"C:$c\"; read go",
+            cat(&[start, ask])
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    harness.control.arm(harness.pane);
+    until_output(&mut harness.control, harness.pane, "A:2");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !events(&harness.socket)
+        .iter()
+        .any(|event| event["DelegationDisarmed"]["reason"] == "budget_exhausted")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the manual arm never spent itself"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(harness.control.delegation_status().is_empty());
+    assert_output_stays_absent(&mut harness.control, harness.pane, "B:");
+
+    let snapshot = settings_apply(
+        &harness.socket,
+        uniterm_proto::SettingsPatch {
+            delegation_auto_arm: Some(true),
+            ..Default::default()
+        },
+    );
+    assert!(snapshot.delegation_auto_arm);
+    // The re-arm is a fresh consent, so its first answer prefers the
+    // always-reply again.
+    until_output(&mut harness.control, harness.pane, "B:2");
+    until_output(&mut harness.control, harness.pane, "C:1");
+    let entries = harness.control.delegation_status();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["unlimited"], true, "{entries:?}");
+    harness.control.type_line(harness.pane, "go");
+}
+
+#[test]
+fn yolo_mode_honours_an_explicit_disarm_for_that_invocation() {
+    // Yolo Mode keeps Panes armed, but never underneath the human: after an
+    // explicit disarm, a permission prompt from the same invocation stays
+    // with the human instead of re-arming the Pane.
+    let dir = common::temp_dir("delegation-yolo-disarm");
+    let start = hook_file(&dir, "start", session_start("s-1"));
+    let ask = hook_file(&dir, "ask", permission("s-1", "Bash", "git status"));
+    let mut harness = harness_auto_arm(
+        &dir,
+        30,
+        &format!(
+            "{}; read go1; {}; read a; echo \"A:$a\"; read go",
+            cat(&[start]),
+            cat(&[ask])
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "s-1");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while harness.control.delegation_status().is_empty() {
+        assert!(Instant::now() < deadline, "the binding never auto-armed");
+        thread::sleep(Duration::from_millis(20));
+    }
+    harness.control.request(ControlCommand::DelegationDisarm {
+        pane: uniterm_core::PaneId(harness.pane),
+    });
+    assert!(harness.control.delegation_status().is_empty());
+    harness.control.type_line(harness.pane, "go1");
+    harness
+        .control
+        .until("permission", |agent| agent["status"] == "Permission");
+    assert_output_stays_absent(&mut harness.control, harness.pane, "A:");
+    assert!(harness.control.delegation_status().is_empty());
+    assert_eq!(harness.control.waiting().len(), 1);
+    let log = events(&harness.socket);
+    assert!(decisions(&log).is_empty(), "{log:?}");
+    assert_eq!(
+        log.iter()
+            .filter(|event| event.get("DelegationArmed").is_some())
+            .count(),
+        1,
+        "Yolo Mode re-armed an explicitly disarmed invocation: {log:?}"
+    );
+    harness.control.type_line(harness.pane, "x");
+    until_output(&mut harness.control, harness.pane, "A:x");
     harness.control.type_line(harness.pane, "go");
 }
 
@@ -881,9 +964,9 @@ fn auto_arm_rearms_a_new_invocation_after_the_previous_exits() {
 fn yolo_mode_settings_toggle_flips_at_runtime() {
     // The Settings "Yolo Mode" switch is the `delegation-auto-arm` key
     // flipped live through the same atomic writer every Settings row uses:
-    // nothing arms retroactively, fresh invocations auto-arm only while it
-    // is on, and turning it off leaves current arms alive - the same
-    // semantics as a config edit plus reload, with no restart.
+    // turning it on arms every already-bound supported Pane, re-applying it
+    // while on is a no-op, fresh invocations auto-arm only while it is on,
+    // and turning it off leaves current arms alive.
     let _config_file = CONFIG_FILE_LOCK.lock().unwrap();
     let dir = common::temp_dir("delegation-yolo");
     let start = hook_file(&dir, "start", session_start("s-1"));
@@ -901,7 +984,8 @@ fn yolo_mode_settings_toggle_flips_at_runtime() {
     );
 
     // Flip it on at runtime; the saved projection proves the round trip.
-    // The already-bound invocation stays unarmed: no retroactive consent.
+    // The already-bound invocation arms at once: Yolo Mode means every
+    // supported Pane approves, including ones bound while it was off.
     let snapshot = settings_apply(
         &harness.socket,
         uniterm_proto::SettingsPatch {
@@ -910,10 +994,28 @@ fn yolo_mode_settings_toggle_flips_at_runtime() {
         },
     );
     assert!(snapshot.delegation_auto_arm);
-    assert!(
-        harness.control.delegation_status().is_empty(),
-        "the runtime flip armed an already-bound invocation"
+    let entries = harness.control.delegation_status();
+    assert_eq!(
+        entries.len(),
+        1,
+        "the runtime flip left an already-bound invocation unarmed"
     );
+    assert_eq!(entries[0]["unlimited"], true, "{entries:?}");
+    // The no-op case: re-applying the switch while it is on arms nothing new.
+    settings_apply(
+        &harness.socket,
+        uniterm_proto::SettingsPatch {
+            delegation_auto_arm: Some(true),
+            ..Default::default()
+        },
+    );
+    let armed = |socket: &Path| {
+        events(socket)
+            .iter()
+            .filter(|event| event.get("DelegationArmed").is_some())
+            .count()
+    };
+    assert_eq!(armed(&harness.socket), 1, "a no-op apply re-armed");
 
     // A fresh invocation in the same Pane auto-arms with no control request.
     std::fs::write(
@@ -1109,6 +1211,11 @@ fn yolo_mode_first_attach_reports_the_boot_config_and_open_writes_nothing() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+    assert_eq!(
+        control.delegation_status()[0]["unlimited"],
+        true,
+        "a file-booted Yolo Mode arm still carried the hourly budget"
+    );
     control.type_line(pane, "go");
 
     // The stale-patch case: an apply that does not name the key cannot zero
@@ -1900,6 +2007,92 @@ fn fast_settle_answers_the_real_codex_dialog_well_under_a_second() {
             .contains("touch ~/demo.txt"),
         "the fingerprint identifies this dialog: {records:?}"
     );
+    harness.control.type_line(harness.pane, "go");
+}
+
+/// The codex 0.165 approval dialog: two options (no don't-ask-again row),
+/// as an agent read it from a live Pane, here with the footer clipped the
+/// way a short pane shows it.
+const CODEX_165_DIALOG_CLIPPED: &str = "  Would you like to run the following command?\n\
+\n\
+  Reason: Access the already-authorized local Uniterm workspace to coordinate analysis agents.\n\
+\n\
+  $ ut agent list --json\n\
+\n\
+\u{203a} 1. Yes, proceed (y)\n\
+  2. No, and tell Codex what to do differently (esc)\n";
+
+#[test]
+fn yolo_mode_answers_the_codex_165_dialog_on_the_fast_settle() {
+    // Under Yolo Mode with no manual arm, the two-option codex 0.165
+    // dialog (footer clipped) is answered on the fast settle with the bare
+    // Enter that confirms the selected option 1, and the same command
+    // asked again after the first answer landed is answered too.
+    let dir = common::temp_dir("delegation-codex-165");
+    let start = codex_hook_file(
+        &dir,
+        "start",
+        json!({"hook_event_name": "SessionStart", "session_id": "c-165", "cwd": "/tmp/demo"}),
+    );
+    let dialog = dir.join("dialog");
+    std::fs::write(&dialog, CODEX_165_DIALOG_CLIPPED).unwrap();
+    let answers = dir.join("answers");
+    let mut harness = harness_auto_arm(
+        &dir,
+        30,
+        &format!(
+            "stty -echo; {start}; read release; printf '\\033[2J\\033[H'; cat '{dialog}'; read first; echo \"FIRST:$first\" >> '{out}'; printf '\\033[2J\\033[Hran it\\n'; sleep 3; printf '\\033[2J\\033[H'; cat '{dialog}'; read second; echo \"SECOND:$second\" >> '{out}'; read go",
+            start = cat(&[start]),
+            dialog = dialog.display(),
+            out = answers.display()
+        ),
+    );
+    run_agent(&mut harness);
+    harness
+        .control
+        .until("bound", |agent| agent["details"]["session_id"] == "c-165");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while harness.control.delegation_status().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "Yolo Mode never armed the binding"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    harness.control.type_line(harness.pane, "release");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !harness
+        .control
+        .read(harness.pane)
+        .contains("what to do differently (esc)")
+    {
+        assert!(Instant::now() < deadline, "the dialog never rendered");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let seen = Instant::now();
+    let content = until_file_contains(&answers, "FIRST:");
+    assert!(
+        seen.elapsed() < Duration::from_secs(1),
+        "the clipped 0.165 dialog fell back to the dwell: {:?}",
+        seen.elapsed()
+    );
+    assert_eq!(content.trim(), "FIRST:", "{content:?}");
+    // The identical dialog a few seconds later is a new ask, not a loop.
+    let content = until_file_contains(&answers, "SECOND:");
+    assert_eq!(content.lines().collect::<Vec<_>>(), ["FIRST:", "SECOND:"]);
+    let log = events(&harness.socket);
+    let records = decisions(&log);
+    assert!(
+        records
+            .iter()
+            .filter(|record| record["record"]["verdict"]["outcome"] == "allow")
+            .count()
+            >= 2,
+        "{records:?}"
+    );
+    assert!(records
+        .iter()
+        .all(|record| record["record"]["agent"] == "codex"));
     harness.control.type_line(harness.pane, "go");
 }
 

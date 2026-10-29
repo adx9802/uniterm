@@ -3052,7 +3052,12 @@ pub struct DelegationEntry {
     /// Approvals typed within the current hourly window.
     pub answers_used: u16,
     /// Approvals still permitted within the current hourly window.
+    /// Meaningless while `unlimited` is set.
     pub answers_remaining: u16,
+    /// Yolo Mode (`delegation-auto-arm`) is on, so the hourly budget does
+    /// not apply and the arm never spends itself.
+    #[serde(default)]
+    pub unlimited: bool,
 }
 
 /// Wire projection of one queued human instruction.
@@ -3347,6 +3352,7 @@ mod tests {
             armed_at_ms: 42,
             answers_used: 2,
             answers_remaining: 28,
+            unlimited: false,
         };
         decoder.push(&encode_frame(&ServerMessage::Delegation {
             entries: vec![entry.clone()],

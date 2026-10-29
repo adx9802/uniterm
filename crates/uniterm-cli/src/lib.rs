@@ -2174,10 +2174,20 @@ fn cmd_delegate(args: &[String]) -> i32 {
                 }
                 Ok(entries) => {
                     for entry in entries {
-                        println!(
-                            "Pane {}\t{}\t{}/{} answers used",
-                            entry.pane.0, entry.agent, entry.answers_used, entry.answers_remaining
-                        );
+                        if entry.unlimited {
+                            println!(
+                                "Pane {}\t{}\t{} answers used (Yolo Mode, no budget)",
+                                entry.pane.0, entry.agent, entry.answers_used
+                            );
+                        } else {
+                            println!(
+                                "Pane {}\t{}\t{}/{} answers used",
+                                entry.pane.0,
+                                entry.agent,
+                                entry.answers_used,
+                                entry.answers_remaining
+                            );
+                        }
                     }
                     0
                 }
