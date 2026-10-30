@@ -149,6 +149,9 @@ pub fn attach_with_options(
     sock_path: &Path,
     options: AttachOptions,
 ) -> std::io::Result<AttachOutcome> {
+    if !options.remote {
+        refuse_own_workspace(sock_path, std::env::var_os("UNITERM_SOCKET").as_deref())?;
+    }
     let cfg = load_client_config();
     overlay::set_ui_theme(cfg.theme);
     // Raw mode; restored on drop.
@@ -163,6 +166,9 @@ pub fn attach_with_options(
         match attach_once(&current, &cfg, winch.read, open_workspaces, options.remote)? {
             Outcome::Exit => return Ok(AttachOutcome::Exit),
             Outcome::Switch(next) => {
+                if !options.remote {
+                    refuse_own_workspace(&next, std::env::var_os("UNITERM_SOCKET").as_deref())?;
+                }
                 current = next;
                 open_workspaces = false;
             }
@@ -172,6 +178,35 @@ pub fn attach_with_options(
             Outcome::Update => return Ok(AttachOutcome::Update(current)),
         }
     }
+}
+
+/// Refuse a whole-Workspace attach from inside one of that Workspace's own
+/// Panes (`own` is the Pane's `$UNITERM_SOCKET`). The server sizes the shared
+/// layout to the smallest client, so such a client shrinks its own Pane, which
+/// shrinks the client again, until every client is left with one row.
+fn refuse_own_workspace(target: &Path, own: Option<&std::ffi::OsStr>) -> std::io::Result<()> {
+    let Some(own) = own.map(Path::new) else {
+        return Ok(());
+    };
+    let same = target == own
+        || matches!(
+            (std::fs::canonicalize(target), std::fs::canonicalize(own)),
+            (Ok(a), Ok(b)) if a == b
+        );
+    if !same {
+        return Ok(());
+    }
+    let name = target
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| target.display().to_string());
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "already inside Workspace '{name}'; attaching to it from one of its own Panes \
+             would shrink it to a single row (use the outer client, or attach to another Workspace)"
+        ),
+    ))
 }
 
 /// Attach the local terminal directly to one server-owned Pane.
@@ -2284,6 +2319,19 @@ mod tests {
         assert!(error
             .to_string()
             .contains("before a detach or exit response"));
+    }
+
+    #[test]
+    fn attach_refuses_only_the_workspace_that_owns_this_pane() {
+        let own = Path::new("/run/user/1000/uniterm/main.sock");
+        let error = refuse_own_workspace(own, Some(own.as_os_str())).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error
+            .to_string()
+            .contains("already inside Workspace 'main'"));
+        let other = Path::new("/run/user/1000/uniterm/work.sock");
+        assert!(refuse_own_workspace(other, Some(own.as_os_str())).is_ok());
+        assert!(refuse_own_workspace(own, None).is_ok());
     }
 
     #[test]

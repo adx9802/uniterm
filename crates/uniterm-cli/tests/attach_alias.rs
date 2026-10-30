@@ -17,6 +17,41 @@ fn invoke(binary: &str, args: &[&str], state: &Path, root: &Path) -> Output {
 }
 
 #[test]
+fn attach_refuses_the_workspace_that_owns_the_calling_pane() {
+    let state = common::isolate_state();
+    let root = common::temp_dir("attach-own");
+    let name = common::unique_workspace_name();
+    let dir = root.join("runtime").join("uniterm");
+    std::fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join(format!("{name}.sock"));
+    let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    for binary in [env!("CARGO_BIN_EXE_ut"), env!("CARGO_BIN_EXE_uniterm")] {
+        let output = Command::new(binary)
+            .args(["attach", &name])
+            .env("XDG_STATE_HOME", &state)
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("UNITERM_SOCKET", &sock)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run CLI with isolated state");
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.starts_with(&format!(
+                "uniterm attach: already inside Workspace '{name}'"
+            )),
+            "{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "must refuse before touching the terminal"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn attach_aliases_share_target_defaults_and_validation() {
     let state = common::isolate_state();
     let root = common::temp_dir("attach-alias");
