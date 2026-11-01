@@ -208,6 +208,48 @@ pub(crate) fn approval_reply(id: &str) -> Option<&'static str> {
     }
 }
 
+/// Provider-owned native resume argv for a session the provider reported, used
+/// when its hooks recorded no resume command: the CLI's own fixed resume flag
+/// followed by the session id. `None` for providers without a verified resume
+/// flag, and for an id that is not a plain token (it must not read as a flag).
+pub(crate) fn resume_argv(id: &str, session_id: &str) -> Option<Vec<String>> {
+    let prefix = match id {
+        "claude" => claude::RESUME,
+        "codex" => codex::RESUME,
+        "cursor" => cursor::RESUME,
+        "opencode" => opencode::RESUME,
+        "copilot" => copilot::RESUME,
+        _ => return None,
+    };
+    let plain = !session_id.is_empty()
+        && session_id.len() <= 200
+        && !session_id.starts_with('-')
+        && session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+    plain.then(|| {
+        prefix
+            .iter()
+            .map(|part| part.to_string())
+            .chain([session_id.to_string()])
+            .collect()
+    })
+}
+
+/// Fill a saved profile's empty resume command from its session id (`resume_argv`).
+pub(crate) fn complete_resume(profile: &mut crate::persist::AgentLaunchSnap) {
+    if !profile.resume_command.is_empty() {
+        return;
+    }
+    if let Some(argv) = profile
+        .session_id
+        .as_deref()
+        .and_then(|session| resume_argv(&profile.provider, session))
+    {
+        profile.resume_command = argv;
+    }
+}
+
 /// Provider-owned reply that approves its own permission prompt and asks it
 /// not to ask again (Claude Code's menu option 2, Cursor Agent's `a`).
 /// `None` means the provider has no verified don't-ask-again option (Codex
@@ -1990,6 +2032,56 @@ mod tests {
         assert!(!resume_argv_allowed("my-custom-agent", "my-custom-agent"));
         assert!(!resume_argv_allowed("codex", "/tmp/codex"));
         assert!(!resume_argv_allowed("codex", "codex-malicious"));
+    }
+
+    #[test]
+    fn a_reported_session_id_gives_the_providers_own_resume_command() {
+        assert_eq!(
+            resume_argv("opencode", "ses_e70de45c9ffe").unwrap(),
+            ["opencode", "--session", "ses_e70de45c9ffe"]
+        );
+        assert_eq!(
+            resume_argv("codex", "abc-1").unwrap(),
+            ["codex", "resume", "abc-1"]
+        );
+        for (provider, argv) in [
+            ("claude", resume_argv("claude", "id")),
+            ("cursor", resume_argv("cursor", "id")),
+            ("copilot", resume_argv("copilot", "id")),
+        ] {
+            assert!(
+                resume_argv_allowed(provider, &argv.unwrap()[0]),
+                "{provider}"
+            );
+        }
+        assert!(resume_argv("gemini", "id").is_none());
+        assert!(resume_argv("claude", "--dangerously-skip-permissions").is_none());
+        assert!(resume_argv("claude", "a b").is_none());
+        assert!(resume_argv("claude", "").is_none());
+    }
+
+    #[test]
+    fn completing_a_profile_fills_only_an_empty_resume_command() {
+        let mut empty = crate::persist::AgentLaunchSnap {
+            provider: "claude".into(),
+            session_id: Some("s1".into()),
+            resume_command: Vec::new(),
+        };
+        complete_resume(&mut empty);
+        assert_eq!(empty.resume_command, ["claude", "--resume", "s1"]);
+        let mut recorded = crate::persist::AgentLaunchSnap {
+            resume_command: vec!["claude".into(), "--continue".into()],
+            ..empty.clone()
+        };
+        complete_resume(&mut recorded);
+        assert_eq!(recorded.resume_command, ["claude", "--continue"]);
+        let mut unknown = crate::persist::AgentLaunchSnap {
+            session_id: None,
+            resume_command: Vec::new(),
+            ..empty
+        };
+        complete_resume(&mut unknown);
+        assert!(unknown.resume_command.is_empty());
     }
 }
 
