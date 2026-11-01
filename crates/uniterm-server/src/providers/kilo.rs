@@ -1,4 +1,8 @@
 use super::{Manifest, Rule};
+
+/// Kilo Code continues a session by id with `kilo --session <id>`.
+pub const RESUME: &[&str] = &["kilo", "--session"];
+
 /// Kilo Code process ownership; status is cooperative or activity-based.
 /// The binary name collides with the kilo text editor, so a false positive is
 /// possible; `ut agent explain` shows the process-match evidence.

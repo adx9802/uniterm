@@ -219,6 +219,18 @@ pub(crate) fn resume_argv(id: &str, session_id: &str) -> Option<Vec<String>> {
         "cursor" => cursor::RESUME,
         "opencode" => opencode::RESUME,
         "copilot" => copilot::RESUME,
+        "amp" => amp::RESUME,
+        "droid" => droid::RESUME,
+        "gemini" => gemini::RESUME,
+        "grok" => grok::RESUME,
+        "hermes" => hermes::RESUME,
+        "kilo" => kilo::RESUME,
+        "kimi" => kimi::RESUME,
+        "kiro" => kiro::RESUME,
+        "omp" => omp::RESUME,
+        "pi" => pi::RESUME,
+        "qoder" => qoder::RESUME,
+        "qodercli" => qodercli::RESUME,
         _ => return None,
     };
     let plain = !session_id.is_empty()
@@ -2044,17 +2056,17 @@ mod tests {
             resume_argv("codex", "abc-1").unwrap(),
             ["codex", "resume", "abc-1"]
         );
-        for (provider, argv) in [
-            ("claude", resume_argv("claude", "id")),
-            ("cursor", resume_argv("cursor", "id")),
-            ("copilot", resume_argv("copilot", "id")),
-        ] {
+        for manifest in BUILT_INS {
+            let argv = resume_argv(manifest.id, "id")
+                .unwrap_or_else(|| panic!("{} has no resume flag", manifest.id));
             assert!(
-                resume_argv_allowed(provider, &argv.unwrap()[0]),
-                "{provider}"
+                resume_argv_allowed(manifest.id, &argv[0]),
+                "{}",
+                manifest.id
             );
+            assert_eq!(argv.last().unwrap(), "id");
         }
-        assert!(resume_argv("gemini", "id").is_none());
+        assert!(resume_argv("my-custom-agent", "id").is_none());
         assert!(resume_argv("claude", "--dangerously-skip-permissions").is_none());
         assert!(resume_argv("claude", "a b").is_none());
         assert!(resume_argv("claude", "").is_none());
