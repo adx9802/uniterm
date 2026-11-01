@@ -80,7 +80,9 @@ pub struct PaneSnap<C = Vec<StoredLine>> {
     pub agent_launch: Option<AgentLaunchSnap>,
 }
 
-/// Provider-owned native resume identity, never inferred during restore.
+/// Provider-owned native resume identity. An empty `resume_command` with a
+/// known `session_id` is completed at restore from the built-in provider's
+/// fixed resume flag (`providers::resume_argv`), never from local manifests.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentLaunchSnap {
     pub provider: String,
