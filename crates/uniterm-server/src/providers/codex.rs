@@ -1,6 +1,9 @@
 use super::{Manifest, Rule, RuleAnchor, RuleRegion};
 use uniterm_core::AgentStatus;
 
+/// Codex resumes a session by id with `codex resume <id>`.
+pub const RESUME: &[&str] = &["codex", "resume"];
+
 // Priorities: visible blocked prompts beat activity titles (120 to 115);
 // activity titles beat grid activity (110 to 100). Activity is anchored to a spinner or a
 // line start so typed prompt text cannot impersonate it (75 to 60), and idle

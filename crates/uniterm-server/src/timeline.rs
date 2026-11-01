@@ -802,10 +802,18 @@ pub(crate) fn resume(
                 }) {
                     profiles.remove(pane);
                 }
+                let resume_command = if resume_command.is_empty() {
+                    session_id
+                        .as_deref()
+                        .and_then(|session| crate::providers::resume_argv(provider, session))
+                        .unwrap_or_default()
+                } else {
+                    resume_command.clone()
+                };
                 if !resume_command.is_empty() {
                     profiles.insert(
                         *pane,
-                        (provider.clone(), session_id.clone(), resume_command.clone()),
+                        (provider.clone(), session_id.clone(), resume_command),
                     );
                 }
             }

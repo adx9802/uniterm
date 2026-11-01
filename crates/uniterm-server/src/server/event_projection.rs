@@ -662,11 +662,14 @@ impl Server {
     pub(super) fn restore_pane_resolved(
         &mut self,
         reg: &Registry,
-        saved: crate::persist::PaneSnap,
+        mut saved: crate::persist::PaneSnap,
         project: Option<ProjectId>,
         project_cwd: Option<&Path>,
         resolved: Option<Result<Vec<String>, String>>,
     ) -> std::io::Result<()> {
+        if let Some(profile) = saved.agent_launch.as_mut() {
+            crate::providers::complete_resume(profile);
+        }
         let pending_native = saved.agent_launch.is_some() && resolved.is_none();
         let profile_to_resolve = pending_native.then(|| saved.agent_launch.clone()).flatten();
         let id = saved.id;
