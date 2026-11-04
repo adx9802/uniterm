@@ -274,6 +274,16 @@ pub(crate) fn complete_resume(profile: &mut crate::persist::AgentLaunchSnap) {
     }
 }
 
+/// Provider-owned fresh launch for a saved agent that never reported a session
+/// to resume: its primary executable with no arguments.
+pub(crate) fn fresh_argv(id: &str) -> Option<Vec<String>> {
+    BUILT_INS
+        .iter()
+        .find(|manifest| manifest.id == id)
+        .and_then(|manifest| manifest.executables.first())
+        .map(|executable| vec![executable.to_string()])
+}
+
 /// Construct argv without passing prompt text through an option parser as flags.
 pub(crate) fn launch_argv(
     id: &str,
