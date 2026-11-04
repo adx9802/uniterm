@@ -289,6 +289,16 @@ pub(crate) fn complete_resume(profile: &mut crate::persist::AgentLaunchSnap) {
     }
 }
 
+/// Provider-owned fresh launch for a saved agent that never reported a session
+/// to resume: its primary executable with no arguments.
+pub(crate) fn fresh_argv(id: &str) -> Option<Vec<String>> {
+    BUILT_INS
+        .iter()
+        .find(|manifest| manifest.id == id)
+        .and_then(|manifest| manifest.executables.first())
+        .map(|executable| vec![executable.to_string()])
+}
+
 /// Provider-owned reply that approves its own permission prompt and asks it
 /// not to ask again (Claude Code's menu option 2, Cursor Agent's `a`).
 /// `None` means the provider has no verified don't-ask-again option (Codex
