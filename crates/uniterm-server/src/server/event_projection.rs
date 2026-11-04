@@ -670,6 +670,21 @@ impl Server {
         if let Some(profile) = saved.agent_launch.as_mut() {
             crate::providers::complete_resume(profile);
         }
+        // An agent seen without a session id has nothing to resume, and every
+        // retry would fail the same way: start the provider fresh, or, with no
+        // provider-owned launch, restore its plain shell.
+        let unresumable = saved
+            .agent_launch
+            .take_if(|profile| {
+                profile.resume_command.is_empty()
+                    && crate::providers::fresh_argv(&profile.provider).is_none()
+            })
+            .map(|profile| profile.provider);
+        let fresh = saved
+            .agent_launch
+            .as_ref()
+            .filter(|profile| profile.resume_command.is_empty())
+            .map(|profile| sanitize_chrome_text(&profile.provider, 40));
         let pending_native = saved.agent_launch.is_some() && resolved.is_none();
         let profile_to_resolve = pending_native.then(|| saved.agent_launch.clone()).flatten();
         let id = saved.id;
@@ -791,7 +806,19 @@ impl Server {
             if !self.recovery_panes.contains(&saved.id) {
                 self.recovery_panes.push(saved.id);
             }
+        } else if let Some(provider) = unresumable {
+            let provider = sanitize_chrome_text(&provider, 40);
+            pane.term.feed(
+                format!("Uniterm saved no {provider} session for this Pane.\r\nStarted a shell.\r\nSaved output remains in scrollback.\r\n")
+                    .as_bytes(),
+            );
         } else if !launch_args.is_empty() {
+            if let Some(provider) = fresh {
+                pane.term.feed(
+                    format!("Uniterm saved no {provider} session for this Pane.\r\nStarted a new {provider} session.\r\nSaved output remains in scrollback.\r\n")
+                        .as_bytes(),
+                );
+            }
             if let Some(profile) = saved.agent_launch {
                 let previous = self.restored_invocations.get(&saved.id).copied();
                 self.bind_native_agent(saved.id, profile, previous, None);
@@ -1301,6 +1328,34 @@ mod tests {
             server.snapshot().windows[0].panes[0].agent_launch,
             Some(profile)
         );
+        server.retire_all_ptys(&mut poll);
+    }
+
+    #[test]
+    fn unlaunchable_agent_without_a_session_restores_its_shell_instead_of_waiting_for_retry() {
+        let (mut server, mut poll, dir) = recovery_fixture();
+        let mut snapshot = server
+            .snapshot()
+            .map_content(uniterm_core::GridCapture::into_stored_lines);
+        snapshot.projects[0].root = dir.to_string_lossy().into_owned();
+        let id = snapshot.windows[0].panes[0].id;
+        snapshot.windows[0].panes[0].cwd = Some(dir.to_string_lossy().into_owned());
+        snapshot.windows[0].panes[0].agent_launch = Some(crate::persist::AgentLaunchSnap {
+            provider: "custom-agent".into(),
+            session_id: None,
+            resume_command: Vec::new(),
+        });
+        server.restore(poll.registry(), snapshot).unwrap();
+        let pane = &server.panes[&id];
+        assert!(pane.pty.child_pid().is_some());
+        assert!(pane.recovery.is_none());
+        assert!(pane.agent.is_none());
+        assert!(!server.recovery_panes.contains(&id));
+        assert!(!server.native_restore_pending(id));
+        let text = pane.term.dump_text();
+        assert!(text.contains("Started a shell."), "{text:?}");
+        assert!(!text.contains("press Enter to retry"));
+        assert!(server.snapshot().windows[0].panes[0].agent_launch.is_none());
         server.retire_all_ptys(&mut poll);
     }
 

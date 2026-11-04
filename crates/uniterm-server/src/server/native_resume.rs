@@ -71,6 +71,17 @@ pub(crate) fn resolve(
     Ok(argv)
 }
 
+/// What a saved profile restores with: its resume command, or the provider's
+/// fresh launch when no session was recorded. The durable profile keeps its
+/// empty command so a session observed later still completes a real resume.
+pub(super) fn restore_argv(profile: &crate::persist::AgentLaunchSnap) -> Option<Vec<String>> {
+    if profile.resume_command.is_empty() {
+        crate::providers::fresh_argv(&profile.provider)
+    } else {
+        Some(profile.resume_command.clone())
+    }
+}
+
 /// Wrap only a validated command while keeping the original durable profile.
 pub(super) fn resolved_args(
     program: &str,
@@ -79,6 +90,10 @@ pub(super) fn resolved_args(
 ) -> Option<Vec<String>> {
     // The bare profile remains durable. The worker's concrete executable is
     // used for this spawn only, so a later restore resolves its own PATH.
+    let profile = &crate::persist::AgentLaunchSnap {
+        resume_command: restore_argv(profile)?,
+        ..profile.clone()
+    };
     native_resume_args(program, profile)?;
     if resolved.len() != profile.resume_command.len()
         || resolved.get(1..) != profile.resume_command.get(1..)
@@ -128,6 +143,7 @@ impl Server {
         profile: crate::persist::AgentLaunchSnap,
     ) {
         let token = self.panes[&pane].token;
+        let argv = restore_argv(&profile).unwrap_or_default();
         self.request_native(
             NativeResumeTarget::Restore {
                 pane,
@@ -136,7 +152,7 @@ impl Server {
                 project_cwd,
             },
             profile.provider,
-            profile.resume_command,
+            argv,
         );
     }
 
@@ -516,6 +532,38 @@ mod tests {
         assert_eq!(server.tasks.get(2).unwrap().context.invocation, Some(41));
         assert_eq!(server.tasks.get(3).unwrap().context.invocation, Some(42));
         assert!(!server.restored_invocations.contains_key(&pane));
+        server.retire_all_ptys(&mut poll);
+    }
+
+    #[test]
+    fn native_restore_without_a_session_starts_the_provider_fresh() {
+        let (mut server, mut poll, dir) = fixture();
+        install(&dir);
+        let pane = server.windows[0].active;
+        let mut snapshot = server
+            .snapshot()
+            .map_content(uniterm_core::GridCapture::into_stored_lines);
+        let empty = crate::persist::AgentLaunchSnap {
+            provider: "codex".into(),
+            session_id: None,
+            resume_command: Vec::new(),
+        };
+        snapshot.windows[0].panes[0].cwd = Some(dir.to_string_lossy().into_owned());
+        snapshot.windows[0].panes[0].agent_launch = Some(empty.clone());
+        server.restore(poll.registry(), snapshot).unwrap();
+        drain_native(&mut server, &mut poll);
+        let restored = &server.panes[&pane];
+        assert!(restored.pty.child_pid().is_some());
+        assert!(restored.recovery.is_none());
+        assert!(!server.recovery_panes.contains(&pane));
+        assert!(restored.agent.as_ref().unwrap().resume_command.is_empty());
+        let text = restored.term.dump_text();
+        assert!(text.contains("Started a new codex session"), "{text:?}");
+        assert!(!text.contains("press Enter to retry"));
+        assert_eq!(
+            server.snapshot().windows[0].panes[0].agent_launch,
+            Some(empty)
+        );
         server.retire_all_ptys(&mut poll);
     }
 
