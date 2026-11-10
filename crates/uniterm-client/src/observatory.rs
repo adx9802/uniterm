@@ -585,6 +585,15 @@ impl ObservatoryView {
                 },
             ),
         ]));
+        if entry.delegated {
+            lines.push(styled_line(&[
+                (&panel, "  "),
+                (
+                    &warning,
+                    "Delegated - permission prompts auto-answer while armed",
+                ),
+            ]));
+        }
         lines.push(styled_line(&[]));
         lines.push(styled_line(&[
             (&panel, "  "),
@@ -777,6 +786,7 @@ mod tests {
             evidence: "permission prompt visible".into(),
             details: uniterm_core::AgentDetails::default(),
             waiting: None,
+            delegated: false,
             run: None,
             role: None,
             role_name: None,

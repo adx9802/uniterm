@@ -220,6 +220,21 @@ pub(crate) fn launch_spec(id: &str) -> LaunchSpec {
     }
 }
 
+/// Provider-owned reply that approves its own permission prompt once, typed
+/// through the same guarded terminal-delivery path a human answer uses.
+/// `None` means the provider's approval contract is not verified here, so
+/// delegated answering withholds and arming is refused. The data stays in
+/// each provider module, like `launch_spec`, so nothing outside a provider
+/// module branches on an agent id.
+pub(crate) fn approval_reply(id: &str) -> Option<&'static str> {
+    match id {
+        "claude" => Some(claude::APPROVAL_REPLY),
+        "codex" => Some(codex::APPROVAL_REPLY),
+        "cursor" => Some(cursor::APPROVAL_REPLY),
+        _ => None,
+    }
+}
+
 /// Provider-owned native resume argv for a session the provider reported, used
 /// when its hooks recorded no resume command: the CLI's own fixed resume flag
 /// followed by the session id. `None` for providers without a verified resume
@@ -282,6 +297,20 @@ pub(crate) fn fresh_argv(id: &str) -> Option<Vec<String>> {
         .find(|manifest| manifest.id == id)
         .and_then(|manifest| manifest.executables.first())
         .map(|executable| vec![executable.to_string()])
+}
+
+/// Provider-owned reply that approves its own permission prompt and asks it
+/// not to ask again (Claude Code's menu option 2, Cursor Agent's `a`).
+/// `None` means the provider has no verified don't-ask-again option (Codex
+/// confirms with a bare Enter only), so the first answer falls back to the
+/// plain approval reply. An always-reply implies an approval reply; the
+/// data stays in each provider module beside its detection rules.
+pub(crate) fn always_reply(id: &str) -> Option<&'static str> {
+    match id {
+        "claude" => Some(claude::ALWAYS_REPLY),
+        "cursor" => Some(cursor::ALWAYS_REPLY),
+        _ => None,
+    }
 }
 
 /// Construct argv without passing prompt text through an option parser as flags.
@@ -1843,6 +1872,42 @@ mod tests {
         assert!(!rejected.activation_valid());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn approval_reply_is_provider_owned_data_with_a_verified_surface() {
+        // Each reply is exactly what the provider's own prompt accepts once:
+        // Claude Code's option 1, Codex's bare Enter, Cursor Agent's y.
+        assert_eq!(approval_reply("claude"), Some("1"));
+        assert_eq!(approval_reply("codex"), Some(""));
+        assert_eq!(approval_reply("cursor"), Some("y"));
+        // Each always-reply is the provider's own don't-ask-again option:
+        // Claude Code's menu option 2, Cursor Agent's `a`. Codex confirms
+        // with a bare Enter only, so it has no always-reply and its first
+        // answer falls back to the plain approval reply.
+        assert_eq!(always_reply("claude"), Some("2"));
+        assert_eq!(always_reply("codex"), None);
+        assert_eq!(always_reply("cursor"), Some("a"));
+        // Every other provider withholds until its approval contract is
+        // verified; delegation never guesses a keystroke.
+        for provider in uniterm_core::agent::PROVIDERS {
+            if !matches!(provider.id, "claude" | "codex" | "cursor") {
+                assert_eq!(approval_reply(provider.id), None, "{}", provider.id);
+                assert_eq!(always_reply(provider.id), None, "{}", provider.id);
+            }
+        }
+        // An always-reply implies an approval reply, and neither smuggles
+        // control bytes; Enter comes from the shared paste path's submit,
+        // not from the data.
+        for provider in uniterm_core::agent::PROVIDERS {
+            if let Some(always) = always_reply(provider.id) {
+                assert!(approval_reply(provider.id).is_some(), "{}", provider.id);
+                assert!(!always.chars().any(char::is_control), "{}", provider.id);
+            }
+            if let Some(reply) = approval_reply(provider.id) {
+                assert!(!reply.chars().any(char::is_control), "{}", provider.id);
+            }
+        }
     }
 
     #[test]

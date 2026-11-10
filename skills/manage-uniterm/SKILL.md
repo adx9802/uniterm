@@ -369,6 +369,22 @@ After Uniterm updates and on local startup or attach, auto-install adds missing 
 Disable auto-install before removing a connector that should stay removed.
 Use `ut agent connector install all` when the human wants an immediate manual install or refresh of all available connectors.
 
+## Delegate permission answers
+
+```sh
+ut delegate arm PANE             # arm one Pane; the verb is the human's consent
+ut delegate status [PANE] --json # armed Panes with hourly answers used and remaining
+ut delegate explain PANE         # the verdict the arm would reach right now
+ut delegate disarm PANE
+```
+
+An armed Pane answers every permission prompt its current invocation raises automatically, structured or screen-detected; there is no command allowlist or deny floor. The safety rails are the kind gate (questions are never delegated), an hourly answer budget that disarms the arm when spent, and a loop guard that withholds an identical re-ask that comes straight back after a plain yes. The guard's identity is the structured tool+preview for hook prompts and, for screen-detected prompts, a fingerprint of the actual dialog on screen - so two different dialogs raised inside the 60-second window are each answered, while a genuinely identical re-ask is still withheld.
+The first answer to a prompt prefers the provider's own don't-ask-again reply, and a re-surfaced prompt gets the plain yes-reply once before the guard applies.
+This is the sanctioned exception to the "never send blanket approval keystrokes" rule: the human arms a Pane deliberately, every verdict is recorded in the event log before anything is typed, and the server types the provider's own approval reply through the same guarded path as `ut waiting answer`.
+Never arm a Pane yourself; arming is the human's decision, over the control API it requires `"confirmed": true`, and it never survives a restart, an invocation change, or a Pane close.
+A budget-spent arm is never re-armed inside the same invocation.
+Questions are never delegated; design and planning prompts always stay with the human.
+
 ## Start and coordinate agents
 
 ```sh

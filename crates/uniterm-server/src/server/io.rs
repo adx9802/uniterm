@@ -172,6 +172,7 @@ impl Server {
         let mut eof = false;
         let mut read_budget_spent = false;
         let mut agent_changed = false;
+        let mut agent_freshly_bound = false;
         let mut agent_transitions = Vec::new();
         let mut cooperative_ready = false;
         let mut invocation_ended = false;
@@ -369,6 +370,7 @@ impl Server {
                             resume_command: Vec::new(),
                             details: uniterm_core::AgentDetails::new(foreground),
                         });
+                        agent_freshly_bound = true;
                     }
                 }
                 let Some(pa) = pane.agent.as_mut() else {
@@ -533,6 +535,7 @@ impl Server {
         }
         if invocation_ended {
             self.cancel_stale_instructions(pane_id, None);
+            self.disarm_delegation(pane_id, "agent_unbound");
         } else if let Some(invocation) = invocation_changed {
             self.cancel_stale_instructions(pane_id, invocation);
         }
@@ -551,6 +554,12 @@ impl Server {
         // still needs recognition even though this pass read no new bytes.
         if !eof && !read_budget_spent && (readable || refresh_waiting || transitioned) {
             self.maybe_auto_approve(reg, pane_id);
+        }
+        if agent_freshly_bound {
+            // An arm never survives into a new invocation: the process group
+            // the human consented for is gone (the detection path's
+            // invocation_changed disarm is the other half of this rule).
+            self.disarm_delegation(pane_id, "invocation_changed");
         }
         if cooperative_ready && !invocation_ended {
             self.deliver_cooperative_instruction(reg, pane_id);

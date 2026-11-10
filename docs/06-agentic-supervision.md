@@ -209,6 +209,15 @@ This is what keeps the tool current as the agent ecosystem churns.
   Heuristic idle evidence never injects queued direction.
 - **Answer and approve**: resolving a `question` or `permission` from the waiting queue injects the answer or the approve/deny back into the pane (or, for structured agents, over their protocol).
   Injection is guarded terminal delivery, not an out-of-band approval: the item must belong to the current invocation and the agent must still show that kind of prompt, otherwise the item is retired and nothing is typed.
+- **Delegated answering**: an armed pane lets the server answer permission prompts on the human's behalf, and the arm itself is the whole consent.
+  The human arms one pane explicitly: `ut delegate arm PANE`, or the control `delegation.arm` with `"confirmed": true`.
+  The arm is scoped to that pane's current agent invocation and never survives a restart, an invocation change, an agent exit, or a pane close.
+  Each new permission item passes the pure kind gate in `uniterm-core` (`evaluate_delegation`), and an armed pane approves every one of them, whether the prompt arrived as structured tool data or was detected by the provider's screen rules: there is no command allowlist and no deny floor, so arming a pane means trusting that invocation's prompts until it ends.
+  On Allow the server types the provider's own approval reply through the same guarded paste path a human answer uses, after revalidating that the prompt is still live; the first answer to a prompt prefers the provider's don't-ask-again reply, and a re-surfaced prompt gets the plain yes-reply once.
+  The `DelegationDecision` is appended to the event log before any bytes move, so the audit trail exists even when typing fails; a screen-detected prompt is recorded with its tool as `unknown` and a bounded, normalized fingerprint of the pane's live prompt region (the same cursor-to-bottom rows the screen rules scan, captured at verdict time) as its preview, so the audit names the actual dialog, not the matched rule text.
+  Three safety rails bound the blast radius: the kind gate keeps questions and direction prompts with the human, the hourly answer budget (`delegation-max-answers-per-hour`, default 30, hard cap 240) disarms a spent arm until the human re-arms, and the loop guard withholds an identical re-ask that comes straight back after the plain yes-reply, since an approval that did not stick is a runaway loop, not a new decision.
+  The guard's identity is the structured tool and preview for OSC 777 prompts and the prompt-region fingerprint for screen-detected ones: the waiting item's summary is only the matched rule text, identical for every dialog one provider raises, so keying on it treated every distinct dialog inside the window as a re-ask and gave hook-less providers one auto-answer per minute.
+  A permission pin whose region reads blank is stale evidence, not a live dialog, and is withheld rather than answered.
 - **Reap**: stopping an agent signals its whole process group with SIGTERM, waits a short grace, then SIGKILL, so no descendants are orphaned.
 
 ## Discovery of external agents

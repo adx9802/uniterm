@@ -7,6 +7,9 @@
 //! end); bare numbers are xterm-256 palette indices.
 
 use crate::{
+    delegate::{
+        DelegationPolicy, DELEGATION_DEFAULT_ANSWERS_PER_HOUR, DELEGATION_MAX_ANSWERS_PER_HOUR,
+    },
     guardrail::{
         GuardLimits, GUARDRAIL_MAX_ACTIVE_RUNS, GUARDRAIL_MAX_ELAPSED_SECONDS,
         GUARDRAIL_MAX_ITERATIONS, GUARDRAIL_MAX_PROJECT_SELECTORS, GUARDRAIL_MAX_ROLE_PANES,
@@ -512,6 +515,9 @@ pub struct Config {
     /// Exact Project names or canonical roots allowed to host native runs.
     /// Empty means all Projects owned by this Workspace.
     pub guardrail_allowed_projects: Vec<String>,
+    /// Hourly auto-answer budget per armed Pane before delegation disarms
+    /// itself and hands every prompt back to the human.
+    pub delegation_max_answers_per_hour: u16,
     /// User overrides keyed by the byte that follows the prefix.
     pub bindings: Vec<KeyBinding>,
 }
@@ -548,6 +554,7 @@ impl Default for Config {
             copy_on_select: true,
             guardrails: GuardLimits::default(),
             guardrail_allowed_projects: Vec::new(),
+            delegation_max_answers_per_hour: DELEGATION_DEFAULT_ANSWERS_PER_HOUR,
             bindings: Vec::new(),
         }
     }
@@ -681,6 +688,13 @@ impl Config {
                         c.guardrail_allowed_projects.push(val.to_string());
                     }
                 }
+                "delegation-max-answers-per-hour" => {
+                    if let Ok(value) = val.parse::<u16>() {
+                        if (1..=DELEGATION_MAX_ANSWERS_PER_HOUR).contains(&value) {
+                            c.delegation_max_answers_per_hour = value;
+                        }
+                    }
+                }
                 "editor" if !val.is_empty() => c.editor = val.to_string(),
                 key if key.starts_with("editor.") => {
                     if let Ok(rule) = EditorRule::parse(&key["editor.".len()..], val) {
@@ -781,6 +795,16 @@ impl Config {
                     if parse_bool_checked(value).is_none() =>
                 {
                     Some("expected true/false, on/off, yes/no, or 1/0".into())
+                }
+                "delegation-max-answers-per-hour"
+                    if !matches!(
+                        value.parse::<u16>(),
+                        Ok(value) if (1..=DELEGATION_MAX_ANSWERS_PER_HOUR).contains(&value)
+                    ) =>
+                {
+                    Some(format!(
+                        "expected an integer from 1 to {DELEGATION_MAX_ANSWERS_PER_HOUR}"
+                    ))
                 }
                 "status-position"
                     if !value.eq_ignore_ascii_case("top")
@@ -917,6 +941,7 @@ impl Config {
                 | "guardrail-max-iterations"
                 | "guardrail-max-elapsed-minutes"
                 | "guardrail-allowed-project"
+                | "delegation-max-answers-per-hour"
                 | "editor"
                 | "status-bg"
                 | "status-fg"
@@ -963,6 +988,7 @@ guardrail-max-active-runs = {}\n\
 guardrail-max-role-panes = {}\n\
 guardrail-max-iterations = {}\n\
 guardrail-max-elapsed-minutes = {}\n\
+delegation-max-answers-per-hour = {}\n\
 scrollback-limit = {}\n\
 restore = {}\n\
 auto-update-connectors = {}\n\
@@ -996,6 +1022,7 @@ editor = {}\n",
             self.guardrails.max_role_panes,
             self.guardrails.max_iterations,
             self.guardrails.max_elapsed_seconds / 60,
+            self.delegation_max_answers_per_hour,
             self.scrollback_limit,
             bool_name(self.restore),
             bool_name(self.auto_update_connectors),
@@ -1023,6 +1050,14 @@ editor = {}\n",
             ));
         }
         text
+    }
+
+    /// The delegation policy this config permits: the hourly auto-answer
+    /// budget, always bounded.
+    pub fn delegation_policy(&self) -> DelegationPolicy {
+        DelegationPolicy {
+            max_answers_per_hour: self.delegation_max_answers_per_hour,
+        }
     }
 
     /// Parse the Settings surface's semicolon-separated exact Project
@@ -1419,6 +1454,55 @@ guardrail-allowed-project = api\n";
         );
         assert!(Config::diagnostics(&config.to_text()).is_empty());
         assert_eq!(Config::parse(&config.to_text()), config);
+    }
+
+    #[test]
+    fn delegation_budget_defaults_parses_and_round_trips() {
+        let config = Config::default();
+        assert_eq!(
+            config.delegation_max_answers_per_hour,
+            DELEGATION_DEFAULT_ANSWERS_PER_HOUR
+        );
+        assert!(config.delegation_policy().validate().is_ok());
+        let config = Config::parse("delegation-max-answers-per-hour = 12\n");
+        assert_eq!(config.delegation_max_answers_per_hour, 12);
+        assert_eq!(config.delegation_policy().max_answers_per_hour, 12);
+        assert!(Config::diagnostics(&config.to_text()).is_empty());
+        assert_eq!(Config::parse(&config.to_text()), config);
+    }
+
+    #[test]
+    fn invalid_delegation_budget_fails_closed_and_is_diagnosed() {
+        let text = "delegation-max-answers-per-hour = 0\ndelegation-max-answers-per-hour = 241\n";
+        let config = Config::parse(text);
+        assert_eq!(
+            config.delegation_max_answers_per_hour,
+            DELEGATION_DEFAULT_ANSWERS_PER_HOUR
+        );
+        let diagnostics = Config::diagnostics(text);
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.message.contains("expected an integer from 1 to")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn removed_delegation_keys_are_diagnosed_as_unknown() {
+        // The retired allowlist key is diagnosed, not silently ignored: a
+        // config that once gated approvals must visibly say it no longer
+        // does.
+        let key = "delegation-allow = cargo test\n";
+        let diagnostics = Config::diagnostics(key);
+        assert_eq!(diagnostics.len(), 1, "{key}");
+        assert!(
+            diagnostics[0].message.contains("unknown key"),
+            "{diagnostics:?}"
+        );
+        // The forgiving runtime parser ignores it, leaving defaults.
+        assert_eq!(Config::parse(key), Config::default());
     }
 
     #[test]

@@ -60,3 +60,16 @@ Local agent providers can be added or overridden without rebuilding, and a valid
 Save that document as `$XDG_CONFIG_HOME/uniterm/providers.json` (normally `~/.config/uniterm/providers.json`).
 Validate it offline with `ut agent manifests validate PATH`.
 The complete schema, source precedence, verified cache, last-known-good, and reload contract is in [`22-provider-detection-manifests.md`](22-provider-detection-manifests.md).
+
+## Delegated answering
+
+One key governs delegated answering (see [06-agentic-supervision.md](06-agentic-supervision.md)):
+
+```ini
+# ~/.config/uniterm/uniterm.conf
+delegation-max-answers-per-hour = 30 # 1..240, default 30
+```
+
+Arming a pane (`ut delegate arm PANE`) approves every permission prompt that invocation raises, structured or screen-detected; there is no command allowlist or deny floor, so the arm is the whole consent.
+An arm disarms itself when the hourly budget is spent and stays disarmed until the human re-arms.
+`ut config check` reports every delegation key problem as an error, and the retired `delegation-allow` key is diagnosed as an unknown key, so an old config cannot look like it still gates approvals.

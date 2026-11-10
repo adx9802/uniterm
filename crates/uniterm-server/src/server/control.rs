@@ -323,6 +323,9 @@ impl Server {
                             "waiting.approve".into(),
                             "agent.auto_approve".into(),
                             "inbox.ephemeral.v1".into(),
+                            "delegation.arm".into(),
+                            "delegation.status".into(),
+                            "delegation.explain".into(),
                             "orchestration.submit".into(),
                             "events.subscribe".into(),
                         ],
@@ -771,6 +774,50 @@ impl Server {
                             found,
                             accepted,
                         },
+                    )
+                }
+                // Arming hands an approval capability to the supervisor, so
+                // it carries the human's confirmation on the wire (docs/19);
+                // an unconfirmed request changes nothing.
+                ControlCommand::DelegationArm { pane, confirmed } => {
+                    if !confirmed {
+                        ControlResponse::error(
+                            request.id,
+                            "confirmation_required",
+                            "Arming delegated answering needs confirmed: true",
+                        )
+                    } else {
+                        match self.arm_delegation(reg, pane) {
+                            Ok(entry) => ControlResponse::ok(request.id, ControlResult::Delegation {
+                                entries: vec![entry],
+                            }),
+                            Err((code, message)) => ControlResponse::error(request.id, code, message),
+                        }
+                    }
+                }
+                ControlCommand::DelegationDisarm { pane } => {
+                    let found = self.disarm_delegation(pane, "disarmed");
+                    ControlResponse::ok(
+                        request.id,
+                        ControlResult::Mutation {
+                            resource: "delegation".into(),
+                            id: Some(pane.0),
+                            found,
+                            accepted: found,
+                        },
+                    )
+                }
+                ControlCommand::DelegationStatus { pane } => ControlResponse::ok(
+                    request.id,
+                    ControlResult::Delegation {
+                        entries: self.delegation_entries(pane),
+                    },
+                ),
+                ControlCommand::DelegationExplain { pane } => {
+                    let (found, verdict) = self.explain_delegation(pane);
+                    ControlResponse::ok(
+                        request.id,
+                        ControlResult::DelegationExplanation { pane, found, verdict },
                     )
                 }
                 ControlCommand::PaneRead { pane, lines } => {

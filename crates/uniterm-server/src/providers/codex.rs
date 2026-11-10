@@ -237,6 +237,11 @@ pub(super) fn global_files() -> Vec<(String, std::path::PathBuf)> {
     .unwrap_or_default()
 }
 
+/// What a human types to approve this provider's permission prompt once: an
+/// empty paste, so the submit is a bare Enter, which confirms the SELECTED
+/// row (option 1, "Yes, proceed", when the dialog opens).
+pub(super) const APPROVAL_REPLY: &str = "";
+
 /// Interactive CLI arguments, kept beside this provider's detection rules.
 pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
     prefix: &[],
