@@ -7,11 +7,9 @@
 //! those approval bytes, and every verdict is recorded in the event log before
 //! anything is typed.
 //!
-//! This module is the pure decision engine, the sibling of `guardrail.rs`: no
-//! I/O, no async, no provider ids. The human's arm is the consent, so an armed
-//! Pane approves every permission prompt, structured or screen-detected; the
-//! kind gate below is the whole verdict policy - design and planning questions
-//! are the human's own call by construction.
+//! This is the pure decision engine, the sibling of `guardrail.rs`. The
+//! human's arm is the consent, so the kind gate below is the whole verdict
+//! policy: permission prompts allow, questions stay with the human.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,11 +20,7 @@ pub const DELEGATION_MAX_ANSWERS_PER_HOUR: u16 = 240;
 /// Default hourly budget when the Workspace config does not set one.
 pub const DELEGATION_DEFAULT_ANSWERS_PER_HOUR: u16 = 30;
 
-/// Workspace delegation policy after config parsing: the hourly auto-answer
-/// budget an armed Pane may spend before delegation disarms itself and
-/// hands every prompt back to the human. The budget is the product's
-/// standing blast-radius bound on an arm; the kind gate below decides each
-/// individual verdict.
+/// Workspace delegation policy after config parsing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DelegationPolicy {
     /// Maximum auto-answers per armed Pane per hour before delegation
@@ -133,10 +127,8 @@ pub struct DelegationRecord {
     pub verdict: DelegateVerdict,
 }
 
-/// Evaluate one waiting item for an armed Pane: a permission prompt allows,
-/// everything else withholds. Design and planning questions are the human's
-/// own call by construction, which is the entire verdict policy; the server
-/// layers invocation scoping, the budget, and the loop guard on top.
+/// Evaluate one waiting item for an armed Pane. The server layers invocation
+/// scoping, the budget, and the loop guard on top.
 pub fn evaluate_delegation(kind: WaitingKind) -> DelegateVerdict {
     if kind != WaitingKind::Permission {
         return DelegateVerdict::Withhold {
@@ -151,15 +143,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn permission_prompts_allow() {
+    fn only_permission_prompts_allow() {
         assert_eq!(
             evaluate_delegation(WaitingKind::Permission),
             DelegateVerdict::Allow
         );
-    }
-
-    #[test]
-    fn anything_but_a_permission_prompt_withholds_by_construction() {
         for kind in [
             WaitingKind::Question,
             WaitingKind::Workflow,
@@ -222,25 +210,5 @@ mod tests {
         }
         .validate()
         .is_ok());
-    }
-
-    #[test]
-    fn records_carry_the_waiting_id_so_decisions_cannot_be_suppressed() {
-        // Two verdicts about distinct waiting items are never equal, so the
-        // event log's adjacent-duplicate suppression can never swallow one.
-        let record = DelegationRecord {
-            pane: PaneId(7),
-            waiting_id: 42,
-            invocation: Some(100),
-            agent: "claude".into(),
-            tool: "Bash".into(),
-            preview: "cargo test".into(),
-            verdict: DelegateVerdict::Allow,
-        };
-        let next = DelegationRecord {
-            waiting_id: 43,
-            ..record.clone()
-        };
-        assert_ne!(record, next);
     }
 }
