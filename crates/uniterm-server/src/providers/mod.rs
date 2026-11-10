@@ -313,6 +313,36 @@ pub(crate) fn always_reply(id: &str) -> Option<&'static str> {
     }
 }
 
+/// A provider's complete permission dialog: the fast settle answers only when
+/// one fragment from each component is visible at once, so a partial or
+/// still-rendering dialog is never answered. Matching folds case.
+pub(crate) struct DialogSignature {
+    pub question: &'static [&'static str],
+    pub options: &'static [&'static str],
+    pub footer: &'static [&'static str],
+}
+
+/// `None` exactly when `approval_reply` is `None`.
+pub(crate) fn dialog_signature(id: &str) -> Option<&'static DialogSignature> {
+    match id {
+        "claude" => Some(&claude::DIALOG_SIGNATURE),
+        "codex" => Some(&codex::DIALOG_SIGNATURE),
+        "cursor" => Some(&cursor::DIALOG_SIGNATURE),
+        _ => None,
+    }
+}
+
+/// Whether `region` shows the provider's complete permission dialog.
+pub(crate) fn complete_permission_dialog(id: &str, region: &str) -> bool {
+    let Some(signature) = dialog_signature(id) else {
+        return false;
+    };
+    let lower = region.to_ascii_lowercase();
+    signature.question.iter().any(|p| lower.contains(p))
+        && signature.options.iter().any(|p| lower.contains(p))
+        && signature.footer.iter().any(|p| lower.contains(p))
+}
+
 /// Construct argv without passing prompt text through an option parser as flags.
 pub(crate) fn launch_argv(
     id: &str,
@@ -1908,6 +1938,128 @@ mod tests {
                 assert!(!reply.chars().any(char::is_control), "{}", provider.id);
             }
         }
+    }
+
+    #[test]
+    fn complete_permission_dialog_requires_the_whole_signature() {
+        // Exactly the providers with a verified approval reply own a
+        // signature; every other provider can never be answered early.
+        for provider in uniterm_core::agent::PROVIDERS {
+            assert_eq!(
+                dialog_signature(provider.id).is_some(),
+                approval_reply(provider.id).is_some(),
+                "{}",
+                provider.id
+            );
+        }
+
+        let claude = "Do you want to proceed?\n  $ rm -rf /tmp/demo\n❯ 1. Yes\n  2. No\nEsc to cancel · Tab to amend\n";
+        assert!(complete_permission_dialog("claude", claude));
+        // Every component is load-bearing: drop one and the dialog is still
+        // rendering, so nothing may answer it.
+        assert!(!complete_permission_dialog(
+            "claude",
+            "  $ rm -rf /tmp/demo\n❯ 1. Yes\n  2. No\nEsc to cancel · Tab to amend\n"
+        ));
+        assert!(!complete_permission_dialog(
+            "claude",
+            "Do you want to proceed?\n  $ rm -rf /tmp/demo\nEsc to cancel · Tab to amend\n"
+        ));
+        assert!(!complete_permission_dialog(
+            "claude",
+            "Do you want to proceed?\n  $ rm -rf /tmp/demo\n❯ 1. Yes\n  2. No\n"
+        ));
+        // Matching folds case like the screen rules themselves.
+        assert!(complete_permission_dialog(
+            "claude",
+            &claude.to_ascii_uppercase()
+        ));
+
+        let codex = "Would you like to run the following command?\n  $ ls -l /var/tmp\n❯ 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\nPress enter to confirm\n";
+        assert!(complete_permission_dialog("codex", codex));
+        assert!(!complete_permission_dialog(
+            "codex",
+            "Would you like to run the following command?\n  $ ls -l /var/tmp\n"
+        ));
+        // The footer alone is the piece a slow repaint shows last.
+        assert!(!complete_permission_dialog(
+            "codex",
+            "Would you like to run the following command?\n  $ ls -l /var/tmp\n❯ 1. Yes, proceed (y)\n"
+        ));
+
+        // The real codex 0.163 approval dialog, captured from a live grid:
+        // the environment and reason lines plus the wrapped command and
+        // options push the anchored question line about fifteen rows above
+        // the footer, and the footer grew an "or esc to cancel" suffix.
+        let codex_live = "  Would you like to run the following command?\n\n  Environment: local\n\n  Reason: Allow creating ~/demo.txt outside\n  the sandbox with touch?\n\n  $ touch ~/demo.txt\n\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with\n     `touch ~/demo.txt` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n";
+        assert!(complete_permission_dialog("codex", codex_live));
+        // The twelve-row status tail of that same dialog keeps the options
+        // and the footer but loses the question line: the signature stays
+        // incomplete there, which is exactly why the fast settle reads a
+        // taller region than the screen rules (the status rule still
+        // matches the footer alone for the generic dwell).
+        let codex_status_tail = "  Reason: Allow creating ~/demo.txt outside\n  the sandbox with touch?\n\n  $ touch ~/demo.txt\n\n\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again for commands that start with\n     `touch ~/demo.txt` (p)\n  3. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n";
+        assert!(!complete_permission_dialog("codex", codex_status_tail));
+
+        // The real codex 0.165 approval dialog, as an agent read it from a
+        // live Pane (recorded in a codex session rollout): two options, no
+        // don't-ask-again row, and the footer still below them.
+        let codex_165 = "  Would you like to run the following command?\n\n  Environment: local\n\n  Reason: Access the already-authorized local Uniterm workspace to coordinate analysis agents.\n\n  $ ut agent list --json\n\n\n\u{203a} 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n";
+        assert!(complete_permission_dialog("codex", codex_165));
+        // The same dialog with the footer clipped (the shape seen on a
+        // short pane): the final "No" row closes the dialog on its own.
+        let codex_165_clipped = "Would you like to run the following command?\nReason: Access the already-authorized local Uniterm workspace to coordinate analysis agents.\n$ ut agent list --json\n\u{203a} 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n";
+        assert!(complete_permission_dialog("codex", codex_165_clipped));
+        // Still painting: option 1 is up but the closing "No" row is not.
+        assert!(!complete_permission_dialog(
+            "codex",
+            "Would you like to run the following command?\n$ ut agent list --json\n\u{203a} 1. Yes, proceed (y)\n"
+        ));
+        // The bare-Enter reply confirms the SELECTED row, so a dialog whose
+        // selection moved to "No" must never complete: Enter would deny.
+        assert!(!complete_permission_dialog(
+            "codex",
+            "Would you like to run the following command?\n$ ut agent list --json\n  1. Yes, proceed (y)\n\u{203a} 2. No, and tell Codex what to do differently (esc)\n\n  Press enter to confirm or esc to cancel\n"
+        ));
+        // The status rule alone (what typed prompt text could imitate) is
+        // not the signature: without the selected option 1 nothing fires.
+        assert!(!complete_permission_dialog(
+            "codex",
+            "\u{203a} would you like to run the following command? press enter to confirm\n"
+        ));
+        // Codex has no don't-ask-again reply, so the two-option dialog's
+        // answer is the bare Enter on option 1 in every shape.
+        assert_eq!(always_reply("codex"), None);
+        assert_eq!(approval_reply("codex"), Some(""));
+
+        let cursor = "Approval required\n  $ cargo test\n❯ run (once) (y)\n  run everything (a)\n  skip (esc or n)\n";
+        assert!(complete_permission_dialog("cursor", cursor));
+        assert!(!complete_permission_dialog(
+            "cursor",
+            "Approval required\n  $ cargo test\n❯ run (once) (y)\n"
+        ));
+        // A question prompt is not a permission dialog: no signature matches
+        // another provider's screen, and unknown providers never match.
+        assert!(!complete_permission_dialog("claude", codex));
+        assert!(!complete_permission_dialog("gemini", claude));
+        assert!(!complete_permission_dialog("custom-agent", claude));
+    }
+
+    #[test]
+    fn typed_prompt_text_cannot_complete_a_signature() {
+        // Text the human types into an input box sits behind a prompt marker
+        // and never reproduces the whole question+options+footer triple, so
+        // echo of the rule patterns alone cannot arm the fast settle.
+        let typed = "> do you want to proceed?\n> esc to cancel\n";
+        assert!(!complete_permission_dialog("claude", typed));
+        let typed_codex =
+            "> would you like to run the following command?\n> press enter to confirm\n";
+        assert!(!complete_permission_dialog("codex", typed_codex));
+        // Question and options without the footer are still two thirds of
+        // the triple: a still-rendering dialog is never completed early.
+        let typed_codex_options =
+            "> would you like to run the following command?\n> 1. yes, proceed (y)\n";
+        assert!(!complete_permission_dialog("codex", typed_codex_options));
     }
 
     #[test]

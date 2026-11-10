@@ -242,6 +242,25 @@ pub(super) fn global_files() -> Vec<(String, std::path::PathBuf)> {
 /// row (option 1, "Yes, proceed", when the dialog opens).
 pub(super) const APPROVAL_REPLY: &str = "";
 
+/// Codex's complete permission dialog (`DialogSignature`). The bare-Enter
+/// reply confirms the selected row, so the options must show the marker on
+/// option 1; a dialog whose selection moved to "No" never completes. The
+/// final "No ... (esc)" row also closes the dialog because a short pane
+/// clips the footer first, and it is the last option in every Codex shape.
+pub(super) const DIALOG_SIGNATURE: super::DialogSignature = super::DialogSignature {
+    question: &[
+        "would you like to run the following command?",
+        "allow codex to",
+        "allow command?",
+        "trust this folder?",
+    ],
+    options: &["\u{203a} 1. yes", "\u{276f} 1. yes"],
+    footer: &[
+        "press enter to confirm",
+        "tell codex what to do differently (esc)",
+    ],
+};
+
 /// Interactive CLI arguments, kept beside this provider's detection rules.
 pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
     prefix: &[],

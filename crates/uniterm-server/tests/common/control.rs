@@ -1,4 +1,4 @@
-//! A control-API client plus scripted-agent helpers for the
+//! A control-API and attach client plus scripted-agent helpers for the
 //! integration tests that drive a live Workspace. Kept out of `mod.rs`,
 //! which the library's own unit tests include, so it may use the crate.
 
@@ -128,6 +128,10 @@ impl Control {
         assert!(frame["error"].is_null(), "arm failed: {frame}");
     }
 
+    pub fn wait_armed(&mut self) {
+        wait_for("an arm", TIMEOUT, || !self.delegation_status().is_empty());
+    }
+
     pub fn type_line(&mut self, pane: u64, text: &str) {
         self.request(ControlCommand::PaneSend {
             pane: uniterm_core::PaneId(pane),
@@ -161,6 +165,12 @@ impl Control {
 
     pub fn until_output(&mut self, pane: u64, needle: &str) {
         wait_for(needle, TIMEOUT, || self.read(pane).contains(needle));
+    }
+
+    /// The moment `needle` first shows on the pane.
+    pub fn seen(&mut self, pane: u64, needle: &str) -> Instant {
+        self.until_output(pane, needle);
+        Instant::now()
     }
 
     pub fn assert_output_stays_absent(&mut self, pane: u64, needle: &str) {
@@ -284,4 +294,79 @@ pub fn start_server(config: uniterm_core::Config) -> (PathBuf, Control, u64) {
         .as_u64()
         .unwrap();
     (socket, control, pane)
+}
+
+/// An attach connection, the live path the client Settings surface uses.
+pub struct Attach {
+    pub stream: UnixStream,
+    pub decoder: uniterm_proto::FrameDecoder,
+}
+
+impl Attach {
+    pub fn open(socket: &Path) -> Self {
+        let mut attach = Attach {
+            stream: UnixStream::connect(socket).unwrap(),
+            decoder: uniterm_proto::FrameDecoder::new(),
+        };
+        attach
+            .stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        attach.send(&uniterm_proto::ClientMessage::Attach {
+            term: "xterm-256color".into(),
+            cols: 80,
+            rows: 24,
+        });
+        attach
+    }
+
+    pub fn send(&mut self, message: &uniterm_proto::ClientMessage) {
+        self.stream
+            .write_all(&uniterm_proto::encode_frame(message))
+            .unwrap();
+    }
+
+    /// The next Settings message: the snapshot, whether it acknowledges a
+    /// save, and any error.
+    pub fn next_settings(&mut self) -> (uniterm_proto::SettingsSnapshot, bool, Option<String>) {
+        let mut buf = [0u8; 65536];
+        loop {
+            while let Ok(Some(message)) = self.decoder.decode::<uniterm_proto::ServerMessage>() {
+                if let uniterm_proto::ServerMessage::Settings {
+                    settings,
+                    saved,
+                    error,
+                } = message
+                {
+                    return (*settings, saved, error);
+                }
+            }
+            let n = std::io::Read::read(&mut self.stream, &mut buf).unwrap();
+            assert!(n > 0, "server closed the attach before a Settings reply");
+            self.decoder.push(&buf[..n]);
+        }
+    }
+
+    /// Apply one patch and return the snapshot once the save round trips;
+    /// the attach snapshot and focus pushes before it are skipped.
+    pub fn apply(
+        &mut self,
+        patch: uniterm_proto::SettingsPatch,
+    ) -> uniterm_proto::SettingsSnapshot {
+        self.send(&uniterm_proto::ClientMessage::SettingsApply(patch));
+        loop {
+            let (settings, saved, error) = self.next_settings();
+            assert!(error.is_none(), "settings apply failed: {error:?}");
+            if saved {
+                return settings;
+            }
+        }
+    }
+}
+
+pub fn settings_apply(
+    socket: &Path,
+    patch: uniterm_proto::SettingsPatch,
+) -> uniterm_proto::SettingsSnapshot {
+    Attach::open(socket).apply(patch)
 }

@@ -927,7 +927,7 @@ impl Server {
             }
             .into(),
         );
-        self.bind_agent(pane, &provider);
+        self.bind_agent(reg, pane, &provider);
         if !manage {
             self.mark_manager_read_only(pane);
         }

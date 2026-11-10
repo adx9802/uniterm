@@ -493,6 +493,13 @@ impl Server {
                         bound_agent: pane.agent.as_ref().map(|agent| agent.id.clone()),
                     });
                 }
+                // Only armed panes pay for the taller dialog-region read.
+                if self.delegated.contains_key(&pane_id) {
+                    let dialog_tail = pane
+                        .term
+                        .evidence_text(super::delegate::DIALOG_REGION_LINES);
+                    super::delegate::track_delegation_settle(pane, true, &dialog_tail);
+                }
                 let dev_tail = pane.term.recent_output_text(12);
                 let dev_hash = evidence_hash(&dev_tail);
                 if dev_hash != pane.last_dev_server_evidence_hash {
@@ -560,6 +567,10 @@ impl Server {
             // the human consented for is gone (the detection path's
             // invocation_changed disarm is the other half of this rule).
             self.disarm_delegation(pane_id, "invocation_changed");
+            // Standing consent (`delegation-auto-arm`) arms the new
+            // invocation immediately; the config key is the human's
+            // confirmation for this path.
+            self.maybe_auto_arm_delegation(reg, pane_id);
         }
         if cooperative_ready && !invocation_ended {
             self.deliver_cooperative_instruction(reg, pane_id);

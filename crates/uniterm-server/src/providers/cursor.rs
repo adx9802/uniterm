@@ -101,6 +101,18 @@ pub(super) const APPROVAL_REPLY: &str = "y";
 /// yes-reply from then on.
 pub(super) const ALWAYS_REPLY: &str = "a";
 
+/// Cursor Agent's complete permission dialog (`DialogSignature`).
+pub(super) const DIALOG_SIGNATURE: super::DialogSignature = super::DialogSignature {
+    question: &[
+        "approval required",
+        "approve this command",
+        "allow this command",
+        "write to this file?",
+    ],
+    options: &["run (once) (y)"],
+    footer: &["skip (esc or n)"],
+};
+
 /// Interactive CLI arguments, kept beside this provider's detection rules.
 pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
     prefix: &[],

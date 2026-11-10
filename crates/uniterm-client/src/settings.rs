@@ -72,6 +72,7 @@ enum Field {
     GuardIterations,
     GuardElapsedMinutes,
     GuardAllowedProjects,
+    YoloMode,
     DesktopMigration,
     Update,
 }
@@ -108,6 +109,7 @@ const FIELDS: &[Field] = &[
     Field::GuardIterations,
     Field::GuardElapsedMinutes,
     Field::GuardAllowedProjects,
+    Field::YoloMode,
     Field::DesktopMigration,
     Field::Update,
 ];
@@ -172,6 +174,7 @@ const SECTIONS: &[Section] = &[
             Field::GuardIterations,
             Field::GuardElapsedMinutes,
             Field::GuardAllowedProjects,
+            Field::YoloMode,
         ],
     },
     Section {
@@ -355,6 +358,7 @@ impl SettingsView {
             Field::GuardIterations => "Iteration limit",
             Field::GuardElapsedMinutes => "Elapsed limit",
             Field::GuardAllowedProjects => "Allowed Projects",
+            Field::YoloMode => "Yolo Mode",
             Field::DesktopMigration => "Import Uniterm Desktop",
             Field::Update => "Update Uniterm",
         }
@@ -387,7 +391,8 @@ impl SettingsView {
             | Field::ConfirmTabClose
             | Field::Restore
             | Field::AutoUpdateConnectors
-            | Field::AutoInstallConnectors => Kind::Switch,
+            | Field::AutoInstallConnectors
+            | Field::YoloMode => Kind::Switch,
             Field::SidebarWidth
             | Field::FileSidebarWidth
             | Field::Scrollback
@@ -441,6 +446,7 @@ impl SettingsView {
             Field::GuardElapsedMinutes => self.settings.guardrail_max_elapsed_minutes.to_string(),
             Field::GuardAllowedProjects => self.settings.guardrail_allowed_projects.clone(),
             Field::AutoApproval => on_off(self.auto_approve).into(),
+            Field::YoloMode => on_off(self.settings.delegation_auto_arm).into(),
             Field::DesktopMigration | Field::Update | Field::AgentConnectors => String::new(),
         }
     }
@@ -459,6 +465,7 @@ impl SettingsView {
             Field::Restore => self.settings.restore,
             Field::AutoUpdateConnectors => self.settings.auto_update_connectors,
             Field::AutoInstallConnectors => self.settings.auto_install_connectors,
+            Field::YoloMode => self.settings.delegation_auto_arm,
             _ => false,
         }
     }
@@ -518,6 +525,7 @@ impl SettingsView {
             Field::GuardAllowedProjects => {
                 "Exact Project names or roots separated by semicolons. Empty allows every Project in the Workspace."
             }
+            Field::YoloMode => "auto type A or Y",
             Field::Update => "Check for a verified release of this local installation, then choose whether to install it. Running Workspaces stay intact.",
             Field::DesktopMigration => {
                 "Import Desktop Workspaces, Projects, paths, and Tabs. Existing CLI Workspaces are never silently replaced."
@@ -657,6 +665,10 @@ impl SettingsView {
             Field::AutoInstallConnectors => toggle(
                 &mut self.settings.auto_install_connectors,
                 &mut patch.auto_install_connectors,
+            ),
+            Field::YoloMode => toggle(
+                &mut self.settings.delegation_auto_arm,
+                &mut patch.delegation_auto_arm,
             ),
             _ => {}
         }
@@ -1718,6 +1730,7 @@ mod tests {
             guardrail_max_iterations: 3,
             guardrail_max_elapsed_minutes: 120,
             guardrail_allowed_projects: "api; /work/web".into(),
+            delegation_auto_arm: false,
             editor: "vi".into(),
             editor_rules: "md=glow".into(),
         }
@@ -1864,6 +1877,44 @@ mod tests {
             .unwrap();
         assert!(rail_row.contains("Theme"));
         assert!(!rail_row.contains("uniterm-dark"));
+    }
+
+    #[test]
+    fn yolo_mode_is_a_guardrails_switch_that_patches_delegation_auto_arm() {
+        let section = SECTIONS
+            .iter()
+            .find(|section| section.title == "Guardrails")
+            .expect("guardrails section");
+        assert!(section.fields.contains(&Field::YoloMode));
+
+        let mut view = SettingsView::new(snapshot(), true, None);
+        select(&mut view, Field::YoloMode);
+        assert_eq!(SettingsView::label(Field::YoloMode), "Yolo Mode");
+        assert_eq!(
+            SettingsView::description(Field::YoloMode),
+            "auto type A or Y"
+        );
+        assert_eq!(view.value(Field::YoloMode), "off");
+        assert!(matches!(
+            view.handle(b" ", 120, 40),
+            SettingsAction::Apply(SettingsPatch {
+                delegation_auto_arm: Some(true),
+                confirm_close: None,
+                ..
+            })
+        ));
+        assert_eq!(view.value(Field::YoloMode), "on");
+        assert!(matches!(
+            view.handle(b" ", 120, 40),
+            SettingsAction::Apply(SettingsPatch {
+                delegation_auto_arm: Some(false),
+                ..
+            })
+        ));
+        assert_eq!(view.value(Field::YoloMode), "off");
+        let frame = String::from_utf8_lossy(&view.render(120, 40)).into_owned();
+        assert!(frame.contains("Yolo Mode"));
+        assert!(frame.contains("auto type A or Y"));
     }
 
     #[test]

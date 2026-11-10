@@ -232,6 +232,9 @@ struct Pane {
     dev_discovery_dirty: bool,
     detection_candidate: Option<DetectionCandidate>,
     last_detection: Option<DetectionRecord>,
+    /// Fast-settle deadline and the hash of the dialog region it was armed
+    /// against (`server::delegate`).
+    delegation_settle: Option<(std::time::Instant, u64)>,
     metadata: HashMap<String, MetadataValue>,
     input: Vec<u8>,
     input_offset: usize,
@@ -681,6 +684,10 @@ pub struct Server {
     /// Drained on the run loop's flush block, where a registry is available
     /// for the guarded terminal-delivery path.
     pending_delegation: Vec<PaneId>,
+    /// Invocations a human explicitly disarmed. Yolo Mode keeps every other
+    /// supported Pane armed, but never re-arms underneath an explicit
+    /// disarm of the same invocation; a new invocation is fresh.
+    delegation_opt_out: HashMap<PaneId, Option<i32>>,
     /// Human direction waiting for an exact active agent invocation.
     instructions: uniterm_core::InstructionQueue,
     /// Native run relationships projected from append-only lifecycle events.
@@ -920,6 +927,7 @@ impl Server {
             auto_approval: uniterm_core::approval::AutoApproval::default(),
             delegated: HashMap::new(),
             pending_delegation: Vec::new(),
+            delegation_opt_out: HashMap::new(),
             instructions: uniterm_core::InstructionQueue::new(),
             run_graph: uniterm_core::RunGraph::new(),
             run_graph_sequence: 0,
@@ -1073,6 +1081,7 @@ impl Server {
                 }
             }
             self.flush_detection_due(poll.registry());
+            self.flush_delegation_settles(poll.registry());
             self.flush_delegation(poll.registry());
             self.flush_prompt_deliveries_due(poll.registry());
             self.flush_artifact_validations_due();
@@ -1160,6 +1169,7 @@ impl Server {
                     .as_ref()
                     .map(|candidate| candidate.since + candidate.dwell)
                     .into_iter()
+                    .chain(pane.delegation_settle.map(|(deadline, _)| deadline))
                     .chain(pane.metadata.values().filter_map(|value| value.expires))
             })
             .chain(self.notification.as_ref().map(|toast| toast.expires))
@@ -1409,6 +1419,7 @@ impl Server {
                 dev_discovery_dirty: false,
                 detection_candidate: None,
                 last_detection: None,
+                delegation_settle: None,
                 metadata: HashMap::new(),
                 input: Vec::new(),
                 input_offset: 0,
@@ -1462,6 +1473,7 @@ impl Server {
             guardrail_max_iterations: self.config.guardrails.max_iterations,
             guardrail_max_elapsed_minutes: self.config.guardrails.max_elapsed_seconds / 60,
             guardrail_allowed_projects: self.config.guardrail_allowed_projects_text(),
+            delegation_auto_arm: self.config.delegation_auto_arm,
             editor: self.config.editor.clone(),
             editor_rules: self.config.editor_rules_text(),
         }
@@ -2217,6 +2229,19 @@ impl Server {
         }
         if let Some(selectors) = guardrail_allowed_projects {
             self.config.guardrail_allowed_projects = selectors;
+        }
+        if let Some(arm) = patch.delegation_auto_arm {
+            // The Settings "Yolo Mode" switch flips standing consent live.
+            // Turning it on arms every live supported-provider Pane at once,
+            // including invocations that bound while it was off: the switch
+            // means "approve everything", so a Pane left unarmed would be
+            // the surprise. Turning it off stops future auto-arms and
+            // restores the hourly budget, but leaves current arms alive.
+            let flipped_on = arm && !self.config.delegation_auto_arm;
+            self.config.delegation_auto_arm = arm;
+            if flipped_on {
+                self.auto_arm_all_delegations(reg);
+            }
         }
         if self.file_manager_visible() {
             self.sync_file_manager(false);

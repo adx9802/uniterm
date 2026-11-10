@@ -515,6 +515,11 @@ pub struct Config {
     /// Exact Project names or canonical roots allowed to host native runs.
     /// Empty means all Projects owned by this Workspace.
     pub guardrail_allowed_projects: Vec<String>,
+    /// Standing consent for delegated answering: every newly bound agent
+    /// invocation whose provider has a verified approval reply is armed
+    /// automatically, without a per-pane `ut delegate arm`. Off by default;
+    /// the manual arm surface is unchanged either way.
+    pub delegation_auto_arm: bool,
     /// Hourly auto-answer budget per armed Pane before delegation disarms
     /// itself and hands every prompt back to the human.
     pub delegation_max_answers_per_hour: u16,
@@ -554,6 +559,7 @@ impl Default for Config {
             copy_on_select: true,
             guardrails: GuardLimits::default(),
             guardrail_allowed_projects: Vec::new(),
+            delegation_auto_arm: false,
             delegation_max_answers_per_hour: DELEGATION_DEFAULT_ANSWERS_PER_HOUR,
             bindings: Vec::new(),
         }
@@ -688,6 +694,7 @@ impl Config {
                         c.guardrail_allowed_projects.push(val.to_string());
                     }
                 }
+                "delegation-auto-arm" => set_bool(&mut c.delegation_auto_arm, val),
                 "delegation-max-answers-per-hour" => {
                     if let Ok(value) = val.parse::<u16>() {
                         if (1..=DELEGATION_MAX_ANSWERS_PER_HOUR).contains(&value) {
@@ -792,6 +799,7 @@ impl Config {
                 | "pane-right-click"
                 | "freeze-on-select"
                 | "copy-on-select"
+                | "delegation-auto-arm"
                     if parse_bool_checked(value).is_none() =>
                 {
                     Some("expected true/false, on/off, yes/no, or 1/0".into())
@@ -941,6 +949,7 @@ impl Config {
                 | "guardrail-max-iterations"
                 | "guardrail-max-elapsed-minutes"
                 | "guardrail-allowed-project"
+                | "delegation-auto-arm"
                 | "delegation-max-answers-per-hour"
                 | "editor"
                 | "status-bg"
@@ -988,6 +997,7 @@ guardrail-max-active-runs = {}\n\
 guardrail-max-role-panes = {}\n\
 guardrail-max-iterations = {}\n\
 guardrail-max-elapsed-minutes = {}\n\
+delegation-auto-arm = {}\n\
 delegation-max-answers-per-hour = {}\n\
 scrollback-limit = {}\n\
 restore = {}\n\
@@ -1022,6 +1032,7 @@ editor = {}\n",
             self.guardrails.max_role_panes,
             self.guardrails.max_iterations,
             self.guardrails.max_elapsed_seconds / 60,
+            bool_name(self.delegation_auto_arm),
             self.delegation_max_answers_per_hour,
             self.scrollback_limit,
             bool_name(self.restore),
@@ -1454,6 +1465,34 @@ guardrail-allowed-project = api\n";
         );
         assert!(Config::diagnostics(&config.to_text()).is_empty());
         assert_eq!(Config::parse(&config.to_text()), config);
+    }
+
+    #[test]
+    fn delegation_auto_arm_defaults_off_parses_and_round_trips() {
+        // Standing consent is opt-in: the default keeps the manual
+        // `ut delegate arm` surface as the only arming path.
+        assert!(!Config::default().delegation_auto_arm);
+        assert!(Config::parse("delegation-auto-arm = on\n").delegation_auto_arm);
+        assert!(!Config::parse("delegation-auto-arm = off\n").delegation_auto_arm);
+        let config = Config::parse("delegation-auto-arm = yes\n");
+        assert!(config.delegation_auto_arm);
+        assert!(Config::diagnostics(&config.to_text()).is_empty());
+        assert_eq!(Config::parse(&config.to_text()), config);
+    }
+
+    #[test]
+    fn invalid_delegation_auto_arm_fails_closed_and_is_diagnosed() {
+        let text = "delegation-auto-arm = sometimes\n";
+        assert!(!Config::parse(text).delegation_auto_arm);
+        let diagnostics = Config::diagnostics(text);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 1);
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("expected true/false, on/off, yes/no, or 1/0"),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

@@ -144,3 +144,15 @@ pub(super) const APPROVAL_REPLY: &str = "1";
 /// by the usual Enter. A prompt variant that does not accept it re-surfaces
 /// and gets the plain yes-reply from then on.
 pub(super) const ALWAYS_REPLY: &str = "2";
+
+/// Claude Code's complete permission dialog (`DialogSignature`).
+pub(super) const DIALOG_SIGNATURE: super::DialogSignature = super::DialogSignature {
+    question: &[
+        "do you want to proceed?",
+        "allow this tool",
+        "do you want to allow this connection?",
+        "waiting for permission",
+    ],
+    options: &["1. yes"],
+    footer: &["esc to cancel"],
+};

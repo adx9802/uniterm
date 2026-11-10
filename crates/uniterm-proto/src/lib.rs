@@ -2328,6 +2328,10 @@ pub struct SettingsPatch {
     pub guardrail_max_elapsed_minutes: Option<u64>,
     /// Semicolon-separated exact Project names or stored roots.
     pub guardrail_allowed_projects: Option<String>,
+    /// Standing consent for delegated answering (the Settings "Yolo Mode"
+    /// switch): every fresh binding of a provider with a verified approval
+    /// reply arms itself. Existing arms are untouched either way.
+    pub delegation_auto_arm: Option<bool>,
     pub editor: Option<String>,
     /// Semicolon-separated `extension=command` overrides from Settings.
     pub editor_rules: Option<String>,
@@ -2373,6 +2377,9 @@ pub struct SettingsSnapshot {
     pub guardrail_max_elapsed_minutes: u64,
     /// Semicolon-separated exact Project names or stored roots.
     pub guardrail_allowed_projects: String,
+    /// Standing consent for delegated answering (the Settings "Yolo Mode"
+    /// switch): fresh bindings of supported providers arm themselves.
+    pub delegation_auto_arm: bool,
     pub editor: String,
     /// Semicolon-separated `extension=command` overrides for editing.
     pub editor_rules: String,
@@ -3112,7 +3119,12 @@ pub struct DelegationEntry {
     /// Approvals typed within the current hourly window.
     pub answers_used: u16,
     /// Approvals still permitted within the current hourly window.
+    /// Meaningless while `unlimited` is set.
     pub answers_remaining: u16,
+    /// Yolo Mode (`delegation-auto-arm`) is on, so the hourly budget does
+    /// not apply and the arm never spends itself.
+    #[serde(default)]
+    pub unlimited: bool,
 }
 
 /// Wire projection of one queued human instruction.
@@ -3164,7 +3176,7 @@ pub struct DevServerEntry {
 /// Local clients normally come from the same installed binary. SSH bridges
 /// check this explicitly before exposing a remote socket so mismatched bincode
 /// enums fail with a useful error instead of corrupting the terminal stream.
-pub const WIRE_PROTOCOL_VERSION: u32 = 31;
+pub const WIRE_PROTOCOL_VERSION: u32 = 32;
 
 /// Cap for trusted server replies, including full terminal repaints.
 pub const MAX_SERVER_FRAME: u32 = 8 * 1024 * 1024;
@@ -3361,13 +3373,14 @@ mod tests {
 
     #[test]
     fn guardrail_settings_round_trip_on_current_wire_protocol() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 31);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 32);
         let bytes = encode_frame(&ClientMessage::SettingsApply(SettingsPatch {
             guardrail_max_active_runs: Some(4),
             guardrail_max_role_panes: Some(12),
             guardrail_max_iterations: Some(5),
             guardrail_max_elapsed_minutes: Some(90),
             guardrail_allowed_projects: Some("api; /work/web".into()),
+            delegation_auto_arm: Some(true),
             ..SettingsPatch::default()
         }));
         let mut decoder = FrameDecoder::new();
@@ -3380,6 +3393,7 @@ mod tests {
                 guardrail_max_iterations: Some(5),
                 guardrail_max_elapsed_minutes: Some(90),
                 guardrail_allowed_projects: Some(ref selectors),
+                delegation_auto_arm: Some(true),
                 ..
             }) if selectors == "api; /work/web"
         ));
@@ -3387,7 +3401,7 @@ mod tests {
 
     #[test]
     fn delegation_surface_round_trips_on_both_protocols() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 31);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 32);
 
         // Binary attach protocol mirrors.
         let bytes = encode_frame(&ClientMessage::DelegationArm { pane: PaneId(7) });
@@ -3405,6 +3419,7 @@ mod tests {
             armed_at_ms: 42,
             answers_used: 2,
             answers_remaining: 28,
+            unlimited: false,
         };
         decoder.push(&encode_frame(&ServerMessage::Delegation {
             entries: vec![entry.clone()],
