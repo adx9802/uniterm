@@ -115,6 +115,7 @@ pub(super) const APPROVAL_DIALOGS: &[super::approval::Dialog] = &[super::approva
     allow: &["trust", "trust (this session only)"],
     deny: &["do not trust", "do not trust (this session only)"],
     alternatives: &[],
+    background_composer: false,
     kind: super::approval::ApprovalKind::WorkspaceTrust,
 }];
 

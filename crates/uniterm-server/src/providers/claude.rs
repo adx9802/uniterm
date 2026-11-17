@@ -75,6 +75,7 @@ pub const MANIFEST: Manifest = Manifest {
                 "do you want to allow claude to fetch this content?",
                 "allow this tool",
                 "do you want to allow this connection?",
+                "teach auto mode about your environment?",
                 "waiting for permission",
                 "ctrl+e to explain",
                 "yes, and don't ask again",
@@ -302,17 +303,28 @@ pub(super) const LAUNCH: super::LaunchSpec = super::LaunchSpec {
 };
 
 // Approval contracts stay beside the provider UI vocabulary.
-pub(super) const APPROVAL_DIALOGS: &[super::approval::Dialog] = &[super::approval::Dialog {
-    headings: &[
-        "do you trust the files in this folder?",
-        "accessing workspace:",
-        "quick safety check:",
-    ],
-    allow: &["yes, i trust this folder", "yes, trust this folder"],
-    deny: &["no, exit", "no, continue without these permissions"],
-    alternatives: &[],
-    kind: super::approval::ApprovalKind::WorkspaceTrust,
-}];
+pub(super) const APPROVAL_DIALOGS: &[super::approval::Dialog] = &[
+    super::approval::Dialog {
+        headings: &[
+            "do you trust the files in this folder?",
+            "accessing workspace:",
+            "quick safety check:",
+        ],
+        allow: &["yes, i trust this folder", "yes, trust this folder"],
+        deny: &["no, exit", "no, continue without these permissions"],
+        alternatives: &[],
+        background_composer: false,
+        kind: super::approval::ApprovalKind::WorkspaceTrust,
+    },
+    super::approval::Dialog {
+        headings: &["teach auto mode about your environment?"],
+        allow: &["yes"],
+        deny: &["not now", "don't show again"],
+        alternatives: &[],
+        background_composer: true,
+        kind: super::approval::ApprovalKind::Permission,
+    },
+];
 
 /// Preserve the provider's generated task text, excluding its application prefix.
 pub(super) fn task_title(title: &str) -> &str {

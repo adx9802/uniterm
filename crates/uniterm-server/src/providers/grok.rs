@@ -100,6 +100,7 @@ pub(super) const APPROVAL_DIALOGS: &[super::approval::Dialog] = &[super::approva
     allow: &["allow once", "allow (once)", "yes"],
     deny: &["reject once", "reject", "deny"],
     alternatives: &[],
+    background_composer: false,
     kind: super::approval::ApprovalKind::Permission,
 }];
 

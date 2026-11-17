@@ -77,6 +77,8 @@ Local detection manifests cannot grant input authority.
 Provider contracts recognize permission headings, affirmative and negative choices, and interaction hints.
 Codex folder trust includes **Trust and continue** and **Back to Agent Command Center**, matching the supplied screenshot.
 Claude folder trust can default to **No, exit**; the recognizer moves down to **Yes, I trust this folder** before confirming.
+Claude's **Teach auto mode about your environment?** consent is accepted from its complete three-choice modal, including when Claude leaves an inactive composer visible below it.
+The following environment-scope picker stays with the human because it contains settings choices, not one approval.
 Grok/Agent's numbered radio layout accepts the selected **Yes, proceed** option, without enabling its persistent grants.
 OpenCode uses live cell styles to distinguish **Allow once** from other buttons, supporting both two-button and three-button layouts.
 Codex and Claude tool contracts also cover file edits, network access, and existing terminal input where supported by the provider.
@@ -126,7 +128,7 @@ Known durability failure suppresses automatic and manual recognized approval.
 
 ## Local verification
 
-`providers::approval::tests` replays captured Codex, Claude, OpenCode, and Grok ANSI through the real VT parser, alongside the Codex screenshot transcription and Pi/Gemini dialog fixtures.
+`providers::approval::tests` replays captured Codex, Claude, OpenCode, and Grok ANSI through the real VT parser, alongside Claude's auto mode consent, the Codex screenshot transcription, and Pi/Gemini dialog fixtures.
 `tests/auto_approval.rs` exercises the real PTY-to-input path across provider identities while status is still `Working`, plus off mode, deduplication, stale ownership, restart revocation, and Workspace scope.
 Its Codex case ends a 256-KiB output burst with folder trust, covering recognition after bounded reads drain.
 `tests/auto_approval_persistence.rs` exercises the config/Settings/protocol/CLI path through real isolated server processes, clean restarts, SIGKILL crashes, ON/OFF compaction, Workspace scope, default revocation, opt-out, and independent terminal restore settings.

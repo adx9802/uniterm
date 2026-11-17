@@ -61,6 +61,8 @@ pub(super) struct Dialog {
     pub deny: &'static [&'static str],
     /// Visible choices that may be crossed but are never authorized.
     pub alternatives: &'static [&'static str],
+    /// Whether this provider-owned modal keeps its inactive composer below it.
+    pub background_composer: bool,
     pub kind: ApprovalKind,
 }
 
@@ -99,6 +101,7 @@ const WORKSPACE_TRUST: Dialog = Dialog {
         "do not trust (this session only)",
     ],
     alternatives: &["trust parent folder (*"],
+    background_composer: false,
     kind: ApprovalKind::WorkspaceTrust,
 };
 
@@ -227,6 +230,7 @@ fn recognize_dialog(provider: &str, screen: &str) -> Option<Approval> {
         ],
         &["no", "no (esc)", "deny", "reject", "reject once"],
         &[],
+        false,
     )
 }
 
@@ -237,6 +241,7 @@ fn selected_dialog(screen: &str, dialog: &Dialog) -> Option<Approval> {
         dialog.allow,
         dialog.deny,
         dialog.alternatives,
+        dialog.background_composer,
     )?;
     choice.kind = dialog.kind;
     Some(choice)
@@ -248,6 +253,7 @@ fn selected_choices(
     allow: &[&str],
     deny: &[&str],
     alternatives: &[&str],
+    background_composer: bool,
 ) -> Option<Approval> {
     let lines: Vec<_> = screen.lines().collect();
     // Use the newest heading; an earlier completed dialog is not authority.
@@ -273,7 +279,17 @@ fn selected_choices(
         .iter()
         .enumerate()
         .skip(header + 1)
-        .filter(|(_, line)| option(line).1)
+        .filter(|(_, line)| {
+            let (label, selected) = option(line);
+            selected
+                && (!background_composer
+                    || choice_matches(label, allow)
+                    || choice_matches(label, deny)
+                    || choice_matches(label, alternatives)
+                    || label.starts_with("no, ")
+                    || label.starts_with("yes, ")
+                    || label == "allow always")
+        })
         .map(|(index, _)| index)
         .collect();
     let [selected] = selected.as_slice() else {
@@ -294,11 +310,14 @@ fn selected_choices(
     if !lines[end..].iter().any(|line| line.contains("esc")) {
         return None;
     }
-    // Do not act on a previous dialog left above a new input prompt.
-    if lines[end + 1..].iter().any(|line| {
-        let line = content(line);
-        line.starts_with(['>', '❯', '›', '→']) || line.starts_with("choose ")
-    }) {
+    // A generic dialog above a new input prompt is stale. One provider-owned
+    // modal is known to leave the inactive composer visible behind it.
+    if !background_composer
+        && lines[end + 1..].iter().any(|line| {
+            let line = content(line);
+            line.starts_with(['>', '❯', '›', '→']) || line.starts_with("choose ")
+        })
+    {
         return None;
     }
     let mut result = fingerprint(&lines[..=end], b"\r");
@@ -573,6 +592,33 @@ mod tests {
                 recognize(provider, &screen.replace(heading, &format!("> {heading}"))).is_none()
             );
         }
+    }
+
+    #[test]
+    fn claude_auto_mode_consent_can_cover_a_background_composer() {
+        let screen = "Teach auto mode about your environment?\n\
+Auto mode works better when it knows your environment. Takes about a minute.\n\
+❯ 1. Yes\n\
+2. Not now\n\
+3. Don't show again\n\
+Enter to confirm · Esc to cancel\n\
+❯ git status\n\
+⏵⏵ auto mode on (shift+tab to cycle)";
+        assert_eq!(recognize("claude", screen).unwrap().keys, b"\r");
+        assert!(recognize(
+            "claude",
+            &screen.replace("2. Not now\n3. Don't show again\n", "")
+        )
+        .is_none());
+        assert!(recognize("claude", &screen.replace("Esc to cancel", "")).is_none());
+        let settings = "Teach auto mode about your environment?\n\
+Claude Code reads this project, your recent Claude sessions, and optionally your shell history.\n\
+How you use Claude here Mixed\n\
+❯ Also scan shell history on\n\
+Also scan your other repos off\n\
+Continue\n\
+←/→ to change · Enter to continue · Esc to cancel";
+        assert!(recognize("claude", settings).is_none());
     }
 
     #[test]

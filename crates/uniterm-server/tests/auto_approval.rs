@@ -320,10 +320,36 @@ read -r gate
         }
     }
     fast_path_provider_matrix(&root, &sockets);
+    claude_auto_mode_consent_accepts_background_composer(&root, &sockets);
     workspace_trust_does_not_need_auto_approve(&root, &sockets);
     manual_navigation_advances_with_auto_mode_off(&root, &sockets);
     std::fs::remove_dir_all(root).unwrap();
     std::fs::remove_dir_all(sockets).unwrap();
+}
+
+fn claude_auto_mode_consent_accepts_background_composer(root: &Path, sockets: &Path) {
+    let result = root.join("claude-auto-mode-consent");
+    let script = format!(
+        r#"
+stty -echo
+printf '\033]777;notify;uniterm://cli-agent;{{"v":1,"event":"prompt_submit","agent":"claude"}}\007'
+printf '\033[2J\033[HTeach auto mode about your environment?\r\nAuto mode works better when it knows your environment. Takes about a minute.\r\n❯ 1. Yes\r\n2. Not now\r\n3. Don'"'"'t show again\r\nEnter to confirm · Esc to cancel\r\n❯ git status\r\n⏵⏵ auto mode on (shift+tab to cycle)'
+IFS= read -r answer
+touch '{}'
+read -r stop
+"#,
+        result.display()
+    );
+    let workspace = Workspace::start(
+        sockets.join(format!("{}.sock", common::unique_workspace_name())),
+        script,
+    );
+    assert!(workspace.mode(Some(true)));
+    wait_until(|| result.exists());
+    assert!(
+        workspace.waiting().is_empty(),
+        "Claude auto mode consent waited for permission dwell"
+    );
 }
 
 fn workspace_trust_does_not_need_auto_approve(root: &Path, sockets: &Path) {

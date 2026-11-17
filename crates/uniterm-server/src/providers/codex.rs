@@ -334,6 +334,7 @@ pub(super) const APPROVAL_DIALOGS: &[super::approval::Dialog] = &[super::approva
     ],
     deny: &["back to agent command center", "quit", "no, quit"],
     alternatives: &[],
+    background_composer: false,
     kind: super::approval::ApprovalKind::WorkspaceTrust,
 }];
 
